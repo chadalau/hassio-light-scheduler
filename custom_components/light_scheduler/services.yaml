@@ -1,0 +1,104 @@
+turn_on_now:
+  name: Ligar agora
+  description: Liga todas as luzes da zona pela duração informada ou padrão.
+  target:
+    entity:
+      integration: light_scheduler
+  fields:
+    duration:
+      name: Duração
+      description: Duração em segundos.
+      selector:
+        number:
+          min: 1
+          max: 86400
+          unit_of_measurement: s
+          mode: box
+stop:
+  name: Desligar
+  description: Desliga as luzes controladas pela execução atual.
+  target:
+    entity:
+      integration: light_scheduler
+add_schedule:
+  name: Adicionar agendamento
+  target:
+    entity:
+      integration: light_scheduler
+  fields:
+    time:
+      required: true
+      selector: {time: {}}
+    days:
+      required: true
+      selector:
+        select:
+          multiple: true
+          options:
+            - {label: Segunda, value: "0"}
+            - {label: Terça, value: "1"}
+            - {label: Quarta, value: "2"}
+            - {label: Quinta, value: "3"}
+            - {label: Sexta, value: "4"}
+            - {label: Sábado, value: "5"}
+            - {label: Domingo, value: "6"}
+    duration:
+      required: true
+      selector: {number: {min: 1, max: 86400, unit_of_measurement: s, mode: box}}
+remove_schedule:
+  name: Remover agendamento
+  target:
+    entity:
+      integration: light_scheduler
+  fields:
+    id:
+      required: true
+      selector: {text: {}}
+update_schedule:
+  name: Atualizar agendamento
+  target:
+    entity:
+      integration: light_scheduler
+  fields:
+    id:
+      required: true
+      selector: {text: {}}
+    time:
+      selector: {time: {}}
+    days:
+      selector:
+        select:
+          multiple: true
+          options:
+            - {label: Segunda, value: "0"}
+            - {label: Terça, value: "1"}
+            - {label: Quarta, value: "2"}
+            - {label: Quinta, value: "3"}
+            - {label: Sexta, value: "4"}
+            - {label: Sábado, value: "5"}
+            - {label: Domingo, value: "6"}
+    duration:
+      selector: {number: {min: 1, max: 86400, unit_of_measurement: s, mode: box}}
+    enabled:
+      selector: {boolean: {}}
+set_schedules:
+  name: Definir agendamentos
+  target:
+    entity:
+      integration: light_scheduler
+  fields:
+    schedules:
+      required: true
+      selector: {object: {}}
+set_zone_options:
+  name: Definir opções da zona
+  target:
+    entity:
+      integration: light_scheduler
+  fields:
+    default_duration:
+      selector: {number: {min: 1, max: 86400, unit_of_measurement: s, mode: box}}
+    target_entity_ids:
+      selector: {entity: {multiple: true, filter: [{domain: light}]}}
+    power_entity_ids:
+      selector: {entity: {multiple: true, filter: [{domain: sensor}]}}
