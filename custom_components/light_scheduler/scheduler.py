@@ -12,7 +12,7 @@ from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.helpers.event import async_track_point_in_time, async_track_state_change_event
 from homeassistant.util import dt as dt_util
 
-from .const import (CONF_DEFAULT_DURATION, CONF_ENABLED, CONF_MAX_DURATION, CONF_POWER_ENTITY_IDS,
+from .const import (CONF_DEFAULT_DURATION, CONF_ENABLED, CONF_ENTITY_MAPPINGS, CONF_MAX_DURATION, CONF_POWER_ENTITY_IDS,
                     CONF_SCHEDULE_DAYS, CONF_SCHEDULE_DURATION, CONF_SCHEDULE_TIME, CONF_SCHEDULES,
                     CONF_TARGET_ENTITY_IDS, HISTORY_MAX_ENTRIES, HISTORY_RETENTION_DAYS, SIGNAL_UPDATE,
                     SOURCE_EXTERNAL, SOURCE_MANUAL, SOURCE_SCHEDULE)
@@ -44,11 +44,43 @@ class LightScheduler:
 
     @property
     def target_entity_ids(self) -> list[str]:
+        mappings = self.options.get(CONF_ENTITY_MAPPINGS, [])
+        if mappings:
+            return [
+                item["target_entity_id"]
+                for item in mappings
+                if isinstance(item, dict) and item.get("target_entity_id")
+            ]
         return list(self.options.get(CONF_TARGET_ENTITY_IDS, []))
 
     @property
     def power_entity_ids(self) -> list[str]:
+        mappings = self.options.get(CONF_ENTITY_MAPPINGS, [])
+        if mappings:
+            return [
+                item["power_entity_id"]
+                for item in mappings
+                if isinstance(item, dict) and item.get("power_entity_id")
+            ]
         return list(self.options.get(CONF_POWER_ENTITY_IDS, []))
+
+    @property
+    def entity_mappings(self) -> list[dict[str, Any]]:
+        """Return ordered target, power and custom-name mappings."""
+        mappings = self.options.get(CONF_ENTITY_MAPPINGS, [])
+        if mappings:
+            return [dict(item) for item in mappings if isinstance(item, dict)]
+        power_ids = list(self.options.get(CONF_POWER_ENTITY_IDS, []))
+        return [
+            {
+                "name": "",
+                "target_entity_id": entity_id,
+                "power_entity_id": power_ids[index] if index < len(power_ids) else "",
+            }
+            for index, entity_id in enumerate(
+                self.options.get(CONF_TARGET_ENTITY_IDS, [])
+            )
+        ]
 
     @property
     def enabled(self) -> bool:

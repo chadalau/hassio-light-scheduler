@@ -13,6 +13,7 @@ from homeassistant.helpers import selector
 from .const import (
     CONF_DEFAULT_DURATION,
     CONF_ENABLED,
+    CONF_ENTITY_MAPPINGS,
     CONF_MAX_DURATION,
     CONF_NAME,
     CONF_POWER_ENTITY_IDS,
@@ -31,6 +32,27 @@ def _entity_list(value: Any) -> list[str]:
     if isinstance(value, str):
         return [value]
     return list(dict.fromkeys(value))
+
+
+def _build_mappings(
+    targets: list[str],
+    powers: list[str],
+    existing: list[dict[str, Any]] | None = None,
+) -> list[dict[str, str]]:
+    """Build ordered mappings while preserving existing custom names."""
+    existing_by_target = {
+        item.get("target_entity_id"): item
+        for item in (existing or [])
+        if isinstance(item, dict) and item.get("target_entity_id")
+    }
+    return [
+        {
+            "name": str(existing_by_target.get(target, {}).get("name") or ""),
+            "target_entity_id": target,
+            "power_entity_id": powers[index] if index < len(powers) else "",
+        }
+        for index, target in enumerate(targets)
+    ]
 
 
 def _schema(values: dict[str, Any] | None = None, *, persisted: bool = False) -> vol.Schema:
@@ -89,14 +111,16 @@ class LightSchedulerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 await self.async_set_unique_id("|".join(sorted(targets)))
                 self._abort_if_unique_id_configured()
                 name = str(user_input[CONF_NAME]).strip()
+                power_ids = _entity_list(user_input.get(CONF_POWER_ENTITY_IDS))
                 return self.async_create_entry(
                     title=name,
                     data={CONF_NAME: name},
                     options={
                         CONF_ENABLED: True,
                         CONF_TARGET_ENTITY_IDS: targets,
-                        CONF_POWER_ENTITY_IDS: _entity_list(
-                            user_input.get(CONF_POWER_ENTITY_IDS)
+                        CONF_POWER_ENTITY_IDS: power_ids,
+                        CONF_ENTITY_MAPPINGS: _build_mappings(
+                            targets, power_ids
                         ),
                         CONF_DEFAULT_DURATION: int(
                             user_input[CONF_DEFAULT_DURATION]
@@ -134,11 +158,15 @@ class LightSchedulerOptionsFlow(config_entries.OptionsFlow):
                     errors={CONF_TARGET_ENTITY_IDS: "no_lights"},
                 )
             name = str(user_input[CONF_NAME]).strip()
+            power_ids = _entity_list(user_input.get(CONF_POWER_ENTITY_IDS))
             options = {
                 **self.config_entry.options,
                 CONF_TARGET_ENTITY_IDS: targets,
-                CONF_POWER_ENTITY_IDS: _entity_list(
-                    user_input.get(CONF_POWER_ENTITY_IDS)
+                CONF_POWER_ENTITY_IDS: power_ids,
+                CONF_ENTITY_MAPPINGS: _build_mappings(
+                    targets,
+                    power_ids,
+                    self.config_entry.options.get(CONF_ENTITY_MAPPINGS, []),
                 ),
                 CONF_DEFAULT_DURATION: int(user_input[CONF_DEFAULT_DURATION]) * 60,
             }

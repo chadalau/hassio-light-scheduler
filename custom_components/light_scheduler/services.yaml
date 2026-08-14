@@ -96,6 +96,10 @@ set_zone_options:
     entity:
       integration: light_scheduler
   fields:
+    entity_mappings:
+      name: Entradas de iluminação
+      description: Lista ordenada com nome, luz ou tomada e sensor de potência.
+      selector: {object: {}}
     default_duration:
       selector: {number: {min: 1, max: 86400, unit_of_measurement: s, mode: box}}
     target_entity_ids:

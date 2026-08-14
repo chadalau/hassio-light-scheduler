@@ -25,6 +25,7 @@ from .const import (
     CARD_JS_URL,
     CONF_DEFAULT_DURATION,
     CONF_ENABLED,
+    CONF_ENTITY_MAPPINGS,
     CONF_POWER_ENTITY_IDS,
     CONF_SCHEDULE_DAYS,
     CONF_SCHEDULE_DURATION,
@@ -83,6 +84,39 @@ def _service_data(call: ServiceCall) -> dict[str, Any]:
     for key in (*_TARGET_KEYS, _ENTRY_ID):
         data.pop(key, None)
     return data
+
+
+def _normalize_mappings(value: Any) -> list[dict[str, str]]:
+    """Validate ordered light-to-power mappings received from the card."""
+    if not isinstance(value, list) or not value:
+        raise ServiceValidationError("Adicione pelo menos uma entrada de luz.")
+    result: list[dict[str, str]] = []
+    used_targets: set[str] = set()
+    for raw in value:
+        if not isinstance(raw, dict):
+            raise ServiceValidationError("Entrada de luz inválida.")
+        target = str(raw.get("target_entity_id") or "").strip()
+        power = str(raw.get("power_entity_id") or "").strip()
+        name = str(raw.get("name") or "").strip()
+        if not target.startswith(("light.", "switch.")):
+            raise ServiceValidationError(
+                "Cada entrada precisa de uma entidade light ou switch."
+            )
+        if target in used_targets:
+            raise ServiceValidationError(f"Entidade repetida: {target}")
+        if power and not power.startswith("sensor."):
+            raise ServiceValidationError(
+                "O medidor de potência precisa ser uma entidade sensor."
+            )
+        used_targets.add(target)
+        result.append(
+            {
+                "name": name,
+                "target_entity_id": target,
+                "power_entity_id": power,
+            }
+        )
+    return result
 
 
 async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
@@ -314,12 +348,23 @@ async def _register_services(hass: HomeAssistant) -> None:
         data = _service_data(call)
         for scheduler in await _resolve(hass, call):
             options = dict(scheduler.options)
+            if CONF_ENTITY_MAPPINGS in data:
+                mappings = _normalize_mappings(data[CONF_ENTITY_MAPPINGS])
+                options[CONF_ENTITY_MAPPINGS] = mappings
+                options[CONF_TARGET_ENTITY_IDS] = [
+                    item["target_entity_id"] for item in mappings
+                ]
+                options[CONF_POWER_ENTITY_IDS] = [
+                    item["power_entity_id"]
+                    for item in mappings
+                    if item["power_entity_id"]
+                ]
             for key in (
                 CONF_DEFAULT_DURATION,
                 CONF_TARGET_ENTITY_IDS,
                 CONF_POWER_ENTITY_IDS,
             ):
-                if key in data:
+                if key in data and CONF_ENTITY_MAPPINGS not in data:
                     options[key] = data[key]
             await _update_options(hass, scheduler, options)
 

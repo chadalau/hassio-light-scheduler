@@ -60,6 +60,14 @@ class LightScheduleStatus(SensorEntity):
         registry = er.async_get(self.hass)
         targets = self.scheduler.target_entity_ids
         explicit = self.scheduler.power_entity_ids
+        configured = {
+            item.get("target_entity_id"): item.get("power_entity_id")
+            for item in self.scheduler.entity_mappings
+            if item.get("target_entity_id") and item.get("power_entity_id")
+        }
+        has_structured_mappings = bool(
+            self.scheduler.options.get("entity_mappings")
+        )
         explicit_set = set(explicit)
         used: set[str] = set()
         mapping: dict[str, str] = {}
@@ -85,15 +93,23 @@ class LightScheduleStatus(SensorEntity):
                 if target_entry and target_entry.device_id
                 else []
             )
-            selected = next(
-                (
-                    entity_id
-                    for entity_id in candidates
-                    if entity_id in explicit_set and entity_id not in used
-                ),
-                None,
-            )
-            if selected is None and index < len(explicit):
+            selected = configured.get(target_id)
+            if selected in used:
+                selected = None
+            if selected is None:
+                selected = next(
+                    (
+                        entity_id
+                        for entity_id in candidates
+                        if entity_id in explicit_set and entity_id not in used
+                    ),
+                    None,
+                )
+            if (
+                selected is None
+                and not has_structured_mappings
+                and index < len(explicit)
+            ):
                 fallback = explicit[index]
                 if fallback not in used:
                     selected = fallback
@@ -128,6 +144,11 @@ class LightScheduleStatus(SensorEntity):
         """Return compact live data for the Lovelace card."""
         targets = self.scheduler.target_entity_ids
         power_mapping = self._power_mapping()
+        configured = {
+            item.get("target_entity_id"): item
+            for item in self.scheduler.entity_mappings
+            if item.get("target_entity_id")
+        }
         lights: list[dict[str, Any]] = []
         total_power = 0.0
 
@@ -135,12 +156,13 @@ class LightScheduleStatus(SensorEntity):
             target = self.hass.states.get(entity_id)
             power_entity_id = power_mapping.get(entity_id)
             watts = self._power_watts(power_entity_id)
+            custom_name = str(configured.get(entity_id, {}).get("name") or "").strip()
             if watts is not None:
                 total_power += watts
             lights.append(
                 {
                     "entity_id": entity_id,
-                    "name": target.name if target else entity_id,
+                    "name": custom_name or (target.name if target else entity_id),
                     "state": target.state if target else STATE_UNAVAILABLE,
                     "available": bool(
                         target
@@ -157,6 +179,14 @@ class LightScheduleStatus(SensorEntity):
             "schedules": self.scheduler.options.get("schedules", []),
             "target_entity_ids": targets,
             "power_entity_ids": list(power_mapping.values()),
+            "entity_mappings": [
+                {
+                    "name": light["name"],
+                    "target_entity_id": light["entity_id"],
+                    "power_entity_id": light["power_entity_id"] or "",
+                }
+                for light in lights
+            ],
             "default_duration": self.scheduler.options.get("default_duration"),
             "lights": lights,
             "lights_on": sum(1 for light in lights if light["state"] == STATE_ON),

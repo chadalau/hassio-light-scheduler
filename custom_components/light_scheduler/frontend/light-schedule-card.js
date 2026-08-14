@@ -1,4 +1,4 @@
-const CARD_VERSION = "0.3.0";
+const CARD_VERSION = "0.4.0";
 
 class LightScheduleCard extends HTMLElement {
   constructor() {
@@ -244,14 +244,14 @@ class LightScheduleCard extends HTMLElement {
   }
 
   _zoneDialog() {
-    const selected = new Set(this._state?.attributes?.target_entity_ids || []);
-    const entities = Object.values(this._hass?.states || {})
-      .filter(
-        (state) =>
-          ["light", "switch"].includes(state.entity_id?.split(".")[0]) &&
-          !state.attributes?.entry_id
-      )
-      .sort((a, b) => (a.attributes?.friendly_name || a.entity_id).localeCompare(b.attributes?.friendly_name || b.entity_id, "pt-BR"));
+    const attrs = this._state?.attributes || {};
+    const mappings = Array.isArray(attrs.entity_mappings) && attrs.entity_mappings.length
+      ? attrs.entity_mappings
+      : (attrs.lights || []).map((light) => ({
+          name: light.name || "",
+          target_entity_id: light.entity_id || "",
+          power_entity_id: light.power_entity_id || "",
+        }));
     return `
       <dialog class="zone-dialog">
         <form method="dialog" class="dialog-form">
@@ -259,26 +259,15 @@ class LightScheduleCard extends HTMLElement {
             <div><small>Configuração da zona</small><h3>Escolher luzes e tomadas</h3></div>
             <button class="icon-button" type="button" data-action="close-zone-dialog" aria-label="Fechar"><ha-icon icon="mdi:close"></ha-icon></button>
           </div>
-          <label class="entity-search">
-            <ha-icon icon="mdi:magnify"></ha-icon>
-            <input type="search" data-zone-search placeholder="Pesquisar entidade">
-          </label>
-          <div class="entity-list">
-            ${entities.length ? entities.map((state) => {
-              const entityId = state.entity_id;
-              const name = state.attributes?.friendly_name || entityId;
-              return `
-                <label class="entity-option" data-search-value="${this._escape(`${name} ${entityId}`.toLowerCase())}">
-                  <input type="checkbox" name="zone_target" value="${this._escape(entityId)}" ${selected.has(entityId) ? "checked" : ""}>
-                  <ha-icon icon="${entityId.startsWith("light.") ? "mdi:lightbulb" : "mdi:power-socket"}"></ha-icon>
-                  <span><strong>${this._escape(name)}</strong><small>${this._escape(entityId)}</small></span>
-                  <ha-icon class="check-icon" icon="mdi:check-circle"></ha-icon>
-                </label>
-              `;
-            }).join("") : `<div class="empty-entities">Nenhuma entidade light ou switch encontrada.</div>`}
+          <div class="mapping-header" aria-hidden="true">
+            <span></span><span>Nome</span><span>Luz ou interruptor</span><span>Potência</span><span></span>
           </div>
+          <div class="mapping-list" data-mapping-list>
+            ${(mappings.length ? mappings : [{}]).map((mapping, index) => this._mappingRow(mapping, index)).join("")}
+          </div>
+          <button class="add-mapping-button" type="button" data-action="add-mapping-row"><ha-icon icon="mdi:plus"></ha-icon>Adicionar entrada</button>
           <p class="dialog-error" data-zone-error hidden></p>
-          <div class="zone-help">Os sensores de potência serão associados automaticamente quando estiverem no mesmo dispositivo.</div>
+          <div class="zone-help">O sensor de potência é opcional. Sem seleção, a integração tenta encontrá-lo automaticamente no mesmo dispositivo.</div>
           <div class="dialog-actions zone-actions">
             <button class="advanced-button" type="button" data-action="integration-settings">Configuração avançada</button>
             <span></span>
@@ -288,6 +277,46 @@ class LightScheduleCard extends HTMLElement {
         </form>
       </dialog>
     `;
+  }
+
+  _mappingRow(mapping = {}, index = 0) {
+    const target = mapping.target_entity_id || "";
+    const power = mapping.power_entity_id || "";
+    const fallbackName = this._hass?.states?.[target]?.attributes?.friendly_name || "";
+    const name = mapping.name || fallbackName;
+    return `
+      <div class="mapping-row" data-mapping-row>
+        <span class="mapping-order">${index + 1}</span>
+        <input class="mapping-name" name="mapping_name" type="text" value="${this._escape(name)}" placeholder="Nome" aria-label="Nome da entrada ${index + 1}">
+        <select name="mapping_target" aria-label="Luz ou interruptor da entrada ${index + 1}">${this._targetOptions(target)}</select>
+        <select name="mapping_power" aria-label="Potência da entrada ${index + 1}">${this._powerOptions(power)}</select>
+        <button class="remove-mapping-button" type="button" data-action="remove-mapping-row" aria-label="Remover entrada ${index + 1}" title="Remover"><ha-icon icon="mdi:delete-outline"></ha-icon></button>
+      </div>
+    `;
+  }
+
+  _targetOptions(selected = "") {
+    const entities = Object.values(this._hass?.states || {})
+      .filter((state) => ["light", "switch"].includes(state.entity_id?.split(".")[0]) && !state.attributes?.entry_id)
+      .sort((a, b) => (a.attributes?.friendly_name || a.entity_id).localeCompare(b.attributes?.friendly_name || b.entity_id, "pt-BR"));
+    return `<option value="">Selecionar luz…</option>${entities.map((state) => {
+      const name = state.attributes?.friendly_name || state.entity_id;
+      return `<option value="${this._escape(state.entity_id)}" ${state.entity_id === selected ? "selected" : ""}>${this._escape(name)}</option>`;
+    }).join("")}`;
+  }
+
+  _powerOptions(selected = "") {
+    const entities = Object.values(this._hass?.states || {})
+      .filter((state) => {
+        if (state.entity_id?.split(".")[0] !== "sensor") return false;
+        const unit = state.attributes?.unit_of_measurement;
+        return state.entity_id === selected || state.attributes?.device_class === "power" || ["W", "kW"].includes(unit);
+      })
+      .sort((a, b) => (a.attributes?.friendly_name || a.entity_id).localeCompare(b.attributes?.friendly_name || b.entity_id, "pt-BR"));
+    return `<option value="">Automático / nenhum</option>${entities.map((state) => {
+      const name = state.attributes?.friendly_name || state.entity_id;
+      return `<option value="${this._escape(state.entity_id)}" ${state.entity_id === selected ? "selected" : ""}>${this._escape(name)}</option>`;
+    }).join("")}`;
   }
 
   _powerDialog() {
@@ -321,6 +350,10 @@ class LightScheduleCard extends HTMLElement {
         await this._hass.callService("light_scheduler", "stop", { entry_id: this._entryId() });
       } else if (action === "open-zone-dialog") {
         this._openZoneDialog();
+      } else if (action === "add-mapping-row") {
+        this._addMappingRow();
+      } else if (action === "remove-mapping-row") {
+        this._removeMappingRow(target);
       } else if (action === "close-zone-dialog") {
         this._zoneDialogElement()?.close();
       } else if (action === "save-zone") {
@@ -449,32 +482,61 @@ class LightScheduleCard extends HTMLElement {
 
   async _saveZone() {
     const dialog = this._zoneDialogElement();
-    const targets = [...dialog.querySelectorAll('input[name="zone_target"]:checked')].map((input) => input.value);
+    const mappings = [...dialog.querySelectorAll("[data-mapping-row]")].map((row) => ({
+      name: row.querySelector('[name="mapping_name"]').value.trim(),
+      target_entity_id: row.querySelector('[name="mapping_target"]').value,
+      power_entity_id: row.querySelector('[name="mapping_power"]').value,
+    }));
     const error = dialog.querySelector("[data-zone-error]");
-    if (!targets.length) {
-      error.textContent = "Selecione pelo menos uma luz ou tomada.";
+    if (!mappings.length || mappings.some((item) => !item.target_entity_id)) {
+      error.textContent = "Selecione uma luz ou tomada em todas as entradas.";
+      error.hidden = false;
+      return;
+    }
+    const targets = mappings.map((item) => item.target_entity_id);
+    if (new Set(targets).size !== targets.length) {
+      error.textContent = "A mesma luz ou tomada não pode aparecer duas vezes.";
       error.hidden = false;
       return;
     }
     await this._hass.callService("light_scheduler", "set_zone_options", {
       entry_id: this._entryId(),
-      target_entity_ids: targets,
+      entity_mappings: mappings,
     });
     dialog.close();
     this._render();
   }
 
   _handleInput(event) {
-    if (event.target.matches("[data-zone-search]")) {
-      const query = event.target.value.trim().toLocaleLowerCase("pt-BR");
-      this.shadowRoot.querySelectorAll(".entity-option").forEach((option) => {
-        option.hidden = Boolean(query) && !option.dataset.searchValue.includes(query);
-      });
-      return;
-    }
     if (event.target.matches('[name="start"], [name="end"]')) {
       this._updateDurationPreview(event.target.form);
     }
+  }
+
+  _addMappingRow() {
+    const list = this._zoneDialogElement()?.querySelector("[data-mapping-list]");
+    if (!list) return;
+    list.insertAdjacentHTML("beforeend", this._mappingRow({}, list.children.length));
+    this._renumberMappingRows(list);
+    list.lastElementChild?.querySelector('[name="mapping_name"]')?.focus();
+  }
+
+  _removeMappingRow(button) {
+    const list = button.closest("[data-mapping-list]");
+    const row = button.closest("[data-mapping-row]");
+    if (!list || !row) return;
+    if (list.children.length === 1) {
+      row.querySelectorAll("input, select").forEach((field) => { field.value = ""; });
+    } else {
+      row.remove();
+    }
+    this._renumberMappingRows(list);
+  }
+
+  _renumberMappingRows(list) {
+    [...list.children].forEach((row, index) => {
+      row.querySelector(".mapping-order").textContent = String(index + 1);
+    });
   }
 
   _updateDurationPreview(form) {
@@ -629,7 +691,7 @@ class LightScheduleCard extends HTMLElement {
         :host { display: block; --ls-blue: var(--primary-color, #2196f3); --ls-green: #76d84b; --ls-amber: #ffc421; }
         * { box-sizing: border-box; }
         ha-card { overflow: hidden; color: var(--primary-text-color); background: var(--ha-card-background, var(--card-background-color)); }
-        button, input { font: inherit; }
+        button, input, select { font: inherit; }
         button { color: inherit; }
         .shell { padding: 12px 14px 13px; }
         .loading, .error { padding: 18px; font-size: 14px; }
@@ -706,6 +768,7 @@ class LightScheduleCard extends HTMLElement {
         .add-button ha-icon { --mdc-icon-size: 17px; }
         dialog { width: min(390px, calc(100vw - 32px)); padding: 0; border: 1px solid rgba(127,127,127,.35); border-radius: 13px; color: var(--primary-text-color); background: var(--card-background-color, #1c1c1c); box-shadow: 0 18px 60px rgba(0,0,0,.5); }
         dialog::backdrop { background: rgba(0,0,0,.62); backdrop-filter: blur(2px); }
+        .zone-dialog { width: min(580px, calc(100vw - 24px)); }
         .power-dialog { width: min(470px, calc(100vw - 32px)); }
         .power-sensor-name { margin: 4px 0 0 6px; color: var(--secondary-text-color); font-size: 9px; }
         .power-chart { min-height: 260px; margin-top: 10px; overflow: hidden; border-radius: 7px; }
@@ -735,24 +798,19 @@ class LightScheduleCard extends HTMLElement {
         .delete-button { display: flex; align-items: center; gap: 5px; padding-left: 0 !important; border: 0; color: var(--error-color); background: transparent; }
         .delete-button[hidden] { display: none; }
         .delete-button ha-icon { --mdc-icon-size: 16px; }
-        .entity-search { height: 39px; margin-top: 14px; padding: 0 10px; display: flex; align-items: center; gap: 7px; border: 1px solid rgba(127,127,127,.4); border-radius: 6px; background: rgba(127,127,127,.08); }
-        .entity-search:focus-within { border-color: var(--ls-blue); }
-        .entity-search ha-icon { --mdc-icon-size: 18px; color: var(--secondary-text-color); }
-        .entity-search input { width: 100%; border: 0; outline: 0; color: var(--primary-text-color); background: transparent; }
-        .entity-list { max-height: min(360px, 48vh); margin-top: 10px; overflow-y: auto; display: grid; gap: 4px; }
-        .entity-option { min-height: 46px; padding: 6px 9px; display: grid; grid-template-columns: 20px 22px minmax(0,1fr) 20px; align-items: center; gap: 7px; border: 1px solid rgba(127,127,127,.2); border-radius: 6px; cursor: pointer; }
-        .entity-option[hidden] { display: none; }
-        .entity-option:hover { background: rgba(127,127,127,.08); }
-        .entity-option input { width: 15px; height: 15px; accent-color: var(--ls-blue); }
-        .entity-option > ha-icon { --mdc-icon-size: 18px; color: var(--secondary-text-color); }
-        .entity-option span { min-width: 0; }
-        .entity-option strong, .entity-option small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-        .entity-option strong { font-size: 11px; }
-        .entity-option small { margin-top: 2px; color: var(--secondary-text-color); font-size: 9px; }
-        .entity-option .check-icon { color: transparent; }
-        .entity-option:has(input:checked) { border-color: rgba(33,150,243,.55); background: rgba(33,150,243,.08); }
-        .entity-option:has(input:checked) .check-icon { color: var(--ls-blue); }
-        .empty-entities { padding: 16px; color: var(--secondary-text-color); text-align: center; font-size: 11px; }
+        .mapping-header, .mapping-row { display: grid; grid-template-columns: 24px minmax(90px,.7fr) minmax(140px,1.2fr) minmax(130px,1fr) 28px; align-items: center; gap: 6px; }
+        .mapping-header { padding: 0 8px 5px; color: var(--secondary-text-color); font-size: 9px; }
+        .mapping-list { max-height: min(390px, 48vh); overflow-y: auto; display: grid; gap: 5px; }
+        .mapping-row { min-height: 48px; padding: 6px 7px; border: 1px solid rgba(127,127,127,.23); border-radius: 7px; background: rgba(127,127,127,.035); }
+        .mapping-order { width: 22px; height: 22px; display: grid; place-items: center; border-radius: 50%; color: var(--secondary-text-color); background: rgba(127,127,127,.14); font-size: 9px; }
+        .mapping-row input, .mapping-row select { width: 100%; min-width: 0; height: 34px; padding: 0 8px; overflow: hidden; text-overflow: ellipsis; border: 1px solid rgba(127,127,127,.32); border-radius: 5px; outline: 0; color: var(--primary-text-color); background: var(--card-background-color, #1c1c1c); font-size: 10px; }
+        .mapping-row input:focus, .mapping-row select:focus { border-color: var(--ls-blue); }
+        .remove-mapping-button { width: 28px; height: 28px; padding: 0; display: grid; place-items: center; border: 0; border-radius: 50%; color: var(--secondary-text-color); background: transparent; cursor: pointer; }
+        .remove-mapping-button:hover { color: var(--error-color); background: rgba(255,80,80,.08); }
+        .remove-mapping-button ha-icon { --mdc-icon-size: 17px; }
+        .add-mapping-button { width: 100%; height: 34px; margin-top: 7px; display: flex; align-items: center; justify-content: center; gap: 6px; border: 1px dashed rgba(33,150,243,.55); border-radius: 6px; color: var(--ls-blue); background: rgba(33,150,243,.04); font-size: 10px; cursor: pointer; }
+        .add-mapping-button:hover { background: rgba(33,150,243,.1); }
+        .add-mapping-button ha-icon { --mdc-icon-size: 17px; }
         .zone-help { margin-top: 9px; color: var(--secondary-text-color); font-size: 9px; line-height: 1.4; }
         .zone-actions { grid-template-columns: auto 1fr auto auto; }
         .advanced-button { padding-left: 0 !important; border: 0; color: var(--ls-blue); background: transparent; font-size: 10px; }
@@ -764,6 +822,15 @@ class LightScheduleCard extends HTMLElement {
           .power-total strong { font-size: 19px; }
           .power-pill { display: none; }
           .schedule-row { grid-template-columns: 18px 96px 7px 40px 7px minmax(0,1fr) 18px; padding-inline: 6px; }
+        }
+        @media (max-width: 560px) {
+          .mapping-header { display: none; }
+          .mapping-row { grid-template-columns: 24px minmax(0,1fr) minmax(0,1fr) 28px; }
+          .mapping-order { grid-row: 1 / 3; }
+          .mapping-name { grid-column: 2 / 4; }
+          .mapping-row select[name="mapping_target"] { grid-column: 2; }
+          .mapping-row select[name="mapping_power"] { grid-column: 3; }
+          .remove-mapping-button { grid-column: 4; grid-row: 1 / 3; }
         }
       </style>
     `;
