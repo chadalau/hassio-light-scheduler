@@ -30,11 +30,13 @@ from .const import (
     CONF_SCHEDULE_DAYS,
     CONF_SCHEDULE_DURATION,
     CONF_SCHEDULE_ID,
+    CONF_SCHEDULE_INTERVAL,
     CONF_SCHEDULE_TIME,
     CONF_SCHEDULES,
     CONF_TARGET_ENTITY_IDS,
     DOMAIN,
     MAX_SCHEDULE_DURATION,
+    MAX_SCHEDULE_INTERVAL,
     MIN_DURATION,
     PLATFORMS,
     SERVICE_ADD_SCHEDULE,
@@ -72,6 +74,10 @@ SCHEDULE_SCHEMA = vol.Schema(
         vol.Required(CONF_SCHEDULE_DURATION): vol.All(
             vol.Coerce(int),
             vol.Range(min=MIN_DURATION, max=MAX_SCHEDULE_DURATION),
+        ),
+        vol.Optional(CONF_SCHEDULE_INTERVAL, default=0): vol.All(
+            vol.Coerce(int),
+            vol.Range(min=0, max=MAX_SCHEDULE_INTERVAL),
         ),
         vol.Optional(CONF_ENABLED, default=True): cv.boolean,
     }
@@ -312,6 +318,7 @@ async def _register_services(hass: HomeAssistant) -> None:
             CONF_SCHEDULE_TIME,
             CONF_SCHEDULE_DAYS,
             CONF_SCHEDULE_DURATION,
+            CONF_SCHEDULE_INTERVAL,
             CONF_ENABLED,
         }
         patch = {key: value for key, value in data.items() if key in allowed}

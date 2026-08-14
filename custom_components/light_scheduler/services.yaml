@@ -45,6 +45,11 @@ add_schedule:
     duration:
       required: true
       selector: {number: {min: 1, max: 86400, unit_of_measurement: s, mode: box}}
+    interval:
+      name: Intervalo entre luzes
+      description: Espera em segundos entre cada luz ao acender e ao apagar. Use 0 para acionar todas sem espera.
+      default: 0
+      selector: {number: {min: 0, max: 300, unit_of_measurement: s, mode: box}}
 remove_schedule:
   name: Remover agendamento
   target:
@@ -79,6 +84,9 @@ update_schedule:
             - {label: Domingo, value: "6"}
     duration:
       selector: {number: {min: 1, max: 86400, unit_of_measurement: s, mode: box}}
+    interval:
+      name: Intervalo entre luzes
+      selector: {number: {min: 0, max: 300, unit_of_measurement: s, mode: box}}
     enabled:
       selector: {boolean: {}}
 set_schedules:

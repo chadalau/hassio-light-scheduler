@@ -1,4 +1,4 @@
-const CARD_VERSION = "0.4.0";
+const CARD_VERSION = "0.5.0";
 
 class LightScheduleCard extends HTMLElement {
   constructor() {
@@ -141,7 +141,12 @@ class LightScheduleCard extends HTMLElement {
   }
 
   _activeRun(attrs) {
-    const source = (attrs.source || attrs.active_source) === "manual" ? "Acionamento manual" : `Ligada desde ${this._formatClock(attrs.started_at || attrs.active_start)}`;
+    const stopping = Boolean(attrs.stopping);
+    const source = stopping
+      ? "Desligando em sequência"
+      : (attrs.source || attrs.active_source) === "manual"
+        ? "Acionamento manual"
+        : `Ligada desde ${this._formatClock(attrs.started_at || attrs.active_start)}`;
     return `
       <div class="run-status">
         <div class="run-line">
@@ -150,7 +155,7 @@ class LightScheduleCard extends HTMLElement {
         </div>
         <div class="run-controls">
           <div class="progress"><span data-progress></span></div>
-          <button type="button" data-action="stop-now"><ha-icon icon="mdi:stop"></ha-icon>Desligar</button>
+          <button type="button" data-action="stop-now" ${stopping ? "disabled" : ""}><ha-icon icon="mdi:stop"></ha-icon>${stopping ? "Desligando" : "Desligar"}</button>
         </div>
       </div>
     `;
@@ -198,12 +203,13 @@ class LightScheduleCard extends HTMLElement {
     const id = String(schedule.id || "");
     const start = schedule.time || schedule.start || "--:--";
     const end = this._scheduleEnd(schedule);
+    const interval = Math.max(0, Number(schedule.interval || 0));
     return `
       <button class="schedule-row" type="button" data-action="edit-schedule" data-schedule-id="${this._escape(id)}">
         <ha-icon class="clock" icon="mdi:clock-outline"></ha-icon>
         <span class="time-range"><strong>${this._escape(start)}</strong><i>→</i><strong>${this._escape(end)}</strong></span>
         <b>•</b>
-        <span class="duration">${this._escape(this._formatDuration(schedule.duration))}</span>
+        <span class="duration" title="${interval ? `Intervalo de ${interval}s entre luzes` : "Sem intervalo"}">${this._escape(this._formatDuration(schedule.duration))}${interval ? ` · ${interval}s` : ""}</span>
         <b>•</b>
         <span class="days" title="${this._escape(this._formatDays(schedule.days))}">${this._escape(this._formatDays(schedule.days))}</span>
         <ha-icon class="edit" icon="mdi:pencil"></ha-icon>
@@ -225,6 +231,10 @@ class LightScheduleCard extends HTMLElement {
             <label>Horário de apagar<input name="end" type="time" required value="22:30"></label>
           </div>
           <div class="duration-preview"><ha-icon icon="mdi:timer-outline"></ha-icon><span>Ficará acesa por <strong data-duration-preview>4h</strong></span></div>
+          <label class="interval-setting">
+            <span><strong>Intervalo entre as luzes</strong><small>Aplicado ao acender e apagar, na mesma ordem. Use 0 para acionar todas juntas.</small></span>
+            <span class="interval-input"><input name="interval" type="number" min="0" max="300" step="1" value="0" required><b>seg</b></span>
+          </label>
           <fieldset>
             <legend>Dias da semana</legend>
             <div class="day-grid">
@@ -386,6 +396,7 @@ class LightScheduleCard extends HTMLElement {
     form.elements.schedule_id.value = schedule?.id || "";
     form.elements.start.value = schedule?.time || schedule?.start || "18:30";
     form.elements.end.value = schedule ? this._scheduleEnd(schedule) : "22:30";
+    form.elements.interval.value = Math.max(0, Number(schedule?.interval || 0));
     const days = Array.isArray(schedule?.days) ? schedule.days.map(Number) : [0, 1, 2, 3, 4, 5, 6];
     form.querySelectorAll('input[name="day"]').forEach((input) => { input.checked = days.includes(Number(input.value)); });
     dialog.querySelector("[data-dialog-title]").textContent = schedule ? "Editar agendamento" : "Novo agendamento";
@@ -408,6 +419,7 @@ class LightScheduleCard extends HTMLElement {
       entry_id: this._entryId(),
       time: form.elements.start.value,
       duration: this._durationBetween(form.elements.start.value, form.elements.end.value),
+      interval: Math.max(0, Math.min(300, Math.round(Number(form.elements.interval.value) || 0))),
       days,
     };
     const scheduleId = form.elements.schedule_id.value;
@@ -611,6 +623,12 @@ class LightScheduleCard extends HTMLElement {
     if (!Number.isFinite(end)) return;
     const remaining = Math.max(0, end - Date.now());
     const countdown = this.shadowRoot.querySelector("[data-countdown]");
+    if (attrs.stopping) {
+      if (countdown) countdown.textContent = "desligando…";
+      const stoppingProgress = this.shadowRoot.querySelector("[data-progress]");
+      if (stoppingProgress) stoppingProgress.style.width = "100%";
+      return;
+    }
     if (countdown) countdown.textContent = `${this._formatCountdown(remaining)} restantes`;
     const progress = this.shadowRoot.querySelector("[data-progress]");
     if (progress) {
@@ -724,6 +742,7 @@ class LightScheduleCard extends HTMLElement {
         .progress { height: 6px; border-radius: 999px; overflow: hidden; background: rgba(127,127,127,.28); }
         .progress span { display: block; height: 100%; border-radius: inherit; background: var(--ls-blue); }
         .run-controls button { height: 31px; display: inline-flex; align-items: center; justify-content: center; gap: 6px; border: 1px solid rgba(127,127,127,.32); border-radius: 5px; background: transparent; color: var(--ls-blue); font-size: 11px; cursor: pointer; }
+        .run-controls button:disabled { opacity: .6; cursor: default; }
         .run-controls ha-icon { --mdc-icon-size: 13px; }
         .divider { height: 1px; margin: 10px 6px 9px; background: rgba(127,127,127,.16); }
         .section-divider { margin-top: 11px; }
@@ -753,7 +772,7 @@ class LightScheduleCard extends HTMLElement {
         .empty-lights strong { font-size: 11px; }
         .empty-lights small { margin-top: 2px; color: var(--secondary-text-color); font-size: 9px; }
         .schedules { display: grid; gap: 4px; }
-        .schedule-row { width: 100%; min-width: 0; height: 35px; padding: 0 8px; display: grid; grid-template-columns: 19px 104px 8px 48px 8px minmax(0,1fr) 20px; align-items: center; gap: 3px; text-align: left; border: 1px solid rgba(127,127,127,.22); border-radius: 6px; background: rgba(127,127,127,.04); cursor: pointer; }
+        .schedule-row { width: 100%; min-width: 0; height: 35px; padding: 0 8px; display: grid; grid-template-columns: 19px 104px 8px 68px 8px minmax(0,1fr) 20px; align-items: center; gap: 3px; text-align: left; border: 1px solid rgba(127,127,127,.22); border-radius: 6px; background: rgba(127,127,127,.04); cursor: pointer; }
         .schedule-row:hover { background: rgba(127,127,127,.1); }
         .schedule-row .clock, .schedule-row .edit { --mdc-icon-size: 16px; color: var(--ls-blue); }
         .schedule-row strong { font-size: 11px; }
@@ -787,6 +806,14 @@ class LightScheduleCard extends HTMLElement {
         .duration-preview { margin-top: 10px; padding: 8px 10px; display: flex; align-items: center; gap: 7px; border-radius: 6px; color: var(--secondary-text-color); background: rgba(33,150,243,.08); font-size: 10px; }
         .duration-preview ha-icon { --mdc-icon-size: 17px; color: var(--ls-blue); }
         .duration-preview strong { color: var(--primary-text-color); }
+        .interval-setting { min-height: 52px; margin-top: 10px; padding: 8px 10px; display: grid; grid-template-columns: minmax(0,1fr) 82px; align-items: center; gap: 12px; border: 1px solid rgba(127,127,127,.24); border-radius: 6px; }
+        .interval-setting > span:first-child strong, .interval-setting > span:first-child small { display: block; }
+        .interval-setting > span:first-child strong { font-size: 11px; }
+        .interval-setting > span:first-child small { margin-top: 3px; color: var(--secondary-text-color); font-size: 9px; line-height: 1.35; }
+        .interval-input { height: 34px; display: grid; grid-template-columns: minmax(0,1fr) 28px; align-items: center; overflow: hidden; border: 1px solid rgba(127,127,127,.35); border-radius: 5px; }
+        .interval-input:focus-within { border-color: var(--ls-blue); }
+        .interval-input input { width: 100%; min-width: 0; height: 100%; padding: 0 5px 0 8px; border: 0; outline: 0; color: var(--primary-text-color); background: transparent; }
+        .interval-input b { color: var(--secondary-text-color); font-size: 9px; font-weight: 400; }
         fieldset { margin: 16px 0 0; padding: 0; border: 0; }
         .day-grid { margin-top: 7px; display: grid; grid-template-columns: repeat(7,1fr); gap: 4px; }
         .day-grid input { position: absolute; opacity: 0; pointer-events: none; }
@@ -821,7 +848,7 @@ class LightScheduleCard extends HTMLElement {
           .summary strong { font-size: 20px; }
           .power-total strong { font-size: 19px; }
           .power-pill { display: none; }
-          .schedule-row { grid-template-columns: 18px 96px 7px 40px 7px minmax(0,1fr) 18px; padding-inline: 6px; }
+          .schedule-row { grid-template-columns: 18px 96px 7px 58px 7px minmax(0,1fr) 18px; padding-inline: 6px; }
         }
         @media (max-width: 560px) {
           .mapping-header { display: none; }

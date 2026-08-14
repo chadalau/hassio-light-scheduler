@@ -30,6 +30,7 @@ O card permite:
 - acompanhar potência individual e total;
 - ver a próxima ação e o tempo restante da execução;
 - adicionar, editar e excluir agendamentos pelos horários de acender e apagar, com duração calculada automaticamente, inclusive ao atravessar a meia-noite;
+- definir um intervalo de 0 a 300 segundos para acender e apagar as entradas uma por vez, sempre na mesma ordem; o horário de apagar inicia a sequência de desligamento;
 - abrir a configuração da zona pelo ícone de engrenagem.
 
 ## Serviços

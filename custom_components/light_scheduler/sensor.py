@@ -193,6 +193,7 @@ class LightScheduleStatus(SensorEntity):
             "lights_available": sum(1 for light in lights if light["available"]),
             "total_power_w": round(total_power, 2),
             "active": self.scheduler.active,
+            "stopping": self.scheduler.stopping,
             "started_at": (
                 self.scheduler.started_at.isoformat()
                 if self.scheduler.started_at

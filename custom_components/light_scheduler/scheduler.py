@@ -1,6 +1,7 @@
 """Event driven scheduling of groups of Home Assistant lights."""
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timedelta
 import logging
 from typing import Any
@@ -13,9 +14,9 @@ from homeassistant.helpers.event import async_track_point_in_time, async_track_s
 from homeassistant.util import dt as dt_util
 
 from .const import (CONF_DEFAULT_DURATION, CONF_ENABLED, CONF_ENTITY_MAPPINGS, CONF_MAX_DURATION, CONF_POWER_ENTITY_IDS,
-                    CONF_SCHEDULE_DAYS, CONF_SCHEDULE_DURATION, CONF_SCHEDULE_TIME, CONF_SCHEDULES,
+                    CONF_SCHEDULE_DAYS, CONF_SCHEDULE_DURATION, CONF_SCHEDULE_INTERVAL, CONF_SCHEDULE_TIME, CONF_SCHEDULES,
                     CONF_TARGET_ENTITY_IDS, HISTORY_MAX_ENTRIES, HISTORY_RETENTION_DAYS, SIGNAL_UPDATE,
-                    SOURCE_EXTERNAL, SOURCE_MANUAL, SOURCE_SCHEDULE)
+                    MAX_SCHEDULE_INTERVAL, SOURCE_EXTERNAL, SOURCE_MANUAL, SOURCE_SCHEDULE)
 from .store import RuntimeStore
 from .next_run import find_next_run
 
@@ -28,6 +29,8 @@ class LightScheduler:
     def __init__(self, hass: HomeAssistant, entry: ConfigEntry, store: RuntimeStore) -> None:
         self.hass, self.entry, self.store = hass, entry, store
         self._active = False
+        self._stopping = False
+        self._run_interval = 0
         self._source: str | None = None
         self._started_at: datetime | None = None
         self._finishes_at: datetime | None = None
@@ -95,6 +98,10 @@ class LightScheduler:
         return self._source
 
     @property
+    def stopping(self) -> bool:
+        return self._stopping
+
+    @property
     def started_at(self) -> datetime | None:
         return self._started_at
 
@@ -160,12 +167,21 @@ class LightScheduler:
         self._next_run = None
         self._next_schedule = None
         if schedule is not None:
-            await self.async_turn_on(duration=int(schedule[CONF_SCHEDULE_DURATION]), source=SOURCE_SCHEDULE)
+            await self.async_turn_on(
+                duration=int(schedule[CONF_SCHEDULE_DURATION]),
+                source=SOURCE_SCHEDULE,
+                interval=int(schedule.get(CONF_SCHEDULE_INTERVAL, 0)),
+            )
         else:
             self._schedule_next()
 
-    async def async_turn_on(self, duration: int | None = None, source: str = SOURCE_MANUAL) -> None:
-        """Turn every configured light on for a bounded duration."""
+    async def async_turn_on(
+        self,
+        duration: int | None = None,
+        source: str = SOURCE_MANUAL,
+        interval: int = 0,
+    ) -> None:
+        """Turn configured lights on sequentially for a bounded duration."""
         if self._active:
             # Repeated clicks and overlapping schedules must never invert the
             # current run. The dedicated stop action is the only way to end it.
@@ -173,14 +189,14 @@ class LightScheduler:
         max_duration = int(self.options.get(CONF_MAX_DURATION, 86400))
         seconds = duration if duration is not None else int(self.options.get(CONF_DEFAULT_DURATION, 14400))
         seconds = max(1, min(int(seconds), max_duration))
+        interval = max(0, min(int(interval), MAX_SCHEDULE_INTERVAL))
         targets = [entity for entity in self.target_entity_ids if self.hass.states.get(entity) and self.hass.states.get(entity).state not in (STATE_UNAVAILABLE, STATE_UNKNOWN)]
         if not targets:
             _LOGGER.warning("No available lights in %s", self.entry.title)
             self._schedule_next(); return
-        # ``homeassistant.turn_on`` supports both native ``light`` entities
-        # and the smart-plug/relay ``switch`` entities used by many lamps.
-        await self.hass.services.async_call("homeassistant", "turn_on", {"entity_id": targets}, blocking=True)
         self._active, self._source = True, source
+        self._stopping = False
+        self._run_interval = interval
         self._started_at = dt_util.utcnow()
         self._finishes_at = self._started_at + timedelta(seconds=seconds)
         if self._unsub_finish:
@@ -188,21 +204,62 @@ class LightScheduler:
         self._unsub_finish = async_track_point_in_time(self.hass, self._async_finish, self._finishes_at)
         self._notify()
 
+        # Arm the exact finish time before ramping up. This keeps the requested
+        # off time stable even when many lights are started with an interval.
+        for index, entity_id in enumerate(targets):
+            if not self._active or self._stopping:
+                break
+            try:
+                await self.hass.services.async_call(
+                    "homeassistant",
+                    "turn_on",
+                    {"entity_id": entity_id},
+                    blocking=True,
+                )
+            except Exception:  # Home Assistant reports the failed entity.
+                _LOGGER.exception(
+                    "Unable to turn on %s in %s", entity_id, self.entry.title
+                )
+            if interval and index < len(targets) - 1 and self._active and not self._stopping:
+                remaining = (self._finishes_at - dt_util.utcnow()).total_seconds()
+                if remaining <= 0:
+                    break
+                await asyncio.sleep(min(interval, remaining))
+
     async def _async_finish(self, _: datetime) -> None:
         await self.async_stop()
 
-    async def async_stop(self) -> None:
-        """Stop only executions started by this integration."""
-        if not self._active:
+    async def async_stop(self, interval: int | None = None) -> None:
+        """Stop an execution using the same ordered interval as startup."""
+        if not self._active or self._stopping:
             return
+        self._stopping = True
+        interval = self._run_interval if interval is None else interval
+        interval = max(0, min(int(interval), MAX_SCHEDULE_INTERVAL))
         if self._unsub_finish:
             self._unsub_finish(); self._unsub_finish = None
-        await self.hass.services.async_call("homeassistant", "turn_off", {"entity_id": self.target_entity_ids}, blocking=True)
+        self._notify()
+        targets = self.target_entity_ids
+        for index, entity_id in enumerate(targets):
+            try:
+                await self.hass.services.async_call(
+                    "homeassistant",
+                    "turn_off",
+                    {"entity_id": entity_id},
+                    blocking=True,
+                )
+            except Exception:
+                _LOGGER.exception(
+                    "Unable to turn off %s in %s", entity_id, self.entry.title
+                )
+            if interval and index < len(targets) - 1:
+                await asyncio.sleep(interval)
         started, source = self._started_at, self._source
         finished = dt_util.utcnow()
         self._history.append({"started_at": started.isoformat() if started else None, "finished_at": finished.isoformat(),
                               "duration": int((finished - started).total_seconds()) if started else None, "source": source})
-        self._active = False; self._source = None; self._started_at = None; self._finishes_at = None
+        self._active = False; self._stopping = False; self._run_interval = 0
+        self._source = None; self._started_at = None; self._finishes_at = None
         await self._save_history()
         self._schedule_next()
 
