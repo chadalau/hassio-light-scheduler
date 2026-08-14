@@ -25,7 +25,8 @@ Use o `entity_id` que existe na sua instalação; ele pode ser copiado em **Ferr
 
 O card permite:
 
-- ver e alternar cada luz ou tomada;
+- alternar cada luz ou tomada clicando no ícone ou nome;
+- abrir o gráfico das últimas 24 horas clicando na potência individual;
 - acompanhar potência individual e total;
 - ver a próxima ação e o tempo restante da execução;
 - adicionar, editar e excluir agendamentos;

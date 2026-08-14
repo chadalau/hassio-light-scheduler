@@ -1,4 +1,4 @@
-const CARD_VERSION = "0.2.2";
+const CARD_VERSION = "0.2.3";
 
 class LightScheduleCard extends HTMLElement {
   constructor() {
@@ -26,6 +26,8 @@ class LightScheduleCard extends HTMLElement {
   set hass(hass) {
     this._hass = hass;
     if (this._hasOpenDialog()) {
+      const historyCard = this.shadowRoot.querySelector("[data-power-chart] > *");
+      if (historyCard) historyCard.hass = hass;
       this._syncTimer();
       this._tick();
       return;
@@ -130,6 +132,7 @@ class LightScheduleCard extends HTMLElement {
         </section>
         ${this._scheduleDialog()}
         ${this._zoneDialog()}
+        ${this._powerDialog()}
       </ha-card>
     `;
 
@@ -157,19 +160,27 @@ class LightScheduleCard extends HTMLElement {
     const entityId = String(light.entity_id || "");
     const isOn = light.state === "on";
     const unavailable = light.available === false || ["unavailable", "unknown"].includes(light.state);
-    const power = this._number(light.power_w);
+    const powerEntityId = String(light.power_entity_id || "");
+    const hasPower = Boolean(powerEntityId);
+    const power = hasPower && light.power_w != null ? this._formatPower(light.power_w) : "—";
     const status = unavailable ? "Indisponível" : isOn ? "Ligada" : "Desligada";
     return `
-      <button class="light-tile ${isOn ? "is-on" : ""} ${unavailable ? "is-unavailable" : ""}" type="button"
-        data-action="toggle-light" data-entity-id="${this._escape(entityId)}" ${unavailable ? "disabled" : ""}
-        aria-label="Alternar ${this._escape(light.name || entityId)}">
-        <ha-icon class="bulb" icon="mdi:lightbulb"></ha-icon>
-        <span class="light-copy">
-          <strong title="${this._escape(light.name || entityId)}">${this._escape(light.name || entityId)}</strong>
-          <small>${status}</small>
-        </span>
-        <span class="power-pill"><ha-icon icon="mdi:flash"></ha-icon>${this._formatPower(power)}</span>
-      </button>
+      <div class="light-tile ${isOn ? "is-on" : ""} ${unavailable ? "is-unavailable" : ""}">
+        <button class="light-main" type="button" data-action="toggle-light" data-entity-id="${this._escape(entityId)}"
+          ${unavailable ? "disabled" : ""} aria-label="Alternar ${this._escape(light.name || entityId)}">
+          <ha-icon class="bulb" icon="mdi:lightbulb"></ha-icon>
+          <span class="light-copy">
+            <strong title="${this._escape(light.name || entityId)}">${this._escape(light.name || entityId)}</strong>
+            <small>${status}</small>
+          </span>
+        </button>
+        <button class="power-pill" type="button" data-action="power-history"
+          data-power-entity-id="${this._escape(powerEntityId)}" data-light-name="${this._escape(light.name || entityId)}"
+          ${hasPower ? "" : "disabled"} aria-label="${hasPower ? `Abrir histórico de potência de ${this._escape(light.name || entityId)}` : "Sensor de potência não configurado"}"
+          title="${hasPower ? "Histórico de potência das últimas 24 horas" : "Sensor de potência não configurado"}">
+          <ha-icon icon="mdi:flash"></ha-icon>${power}
+        </button>
+      </div>
     `;
   }
 
@@ -276,6 +287,21 @@ class LightScheduleCard extends HTMLElement {
     `;
   }
 
+  _powerDialog() {
+    return `
+      <dialog class="power-dialog">
+        <div class="dialog-form">
+          <div class="dialog-header">
+            <div><small>Histórico de 24 horas</small><h3 data-power-title>Potência</h3></div>
+            <button class="icon-button" type="button" data-action="close-power-dialog" aria-label="Fechar"><ha-icon icon="mdi:close"></ha-icon></button>
+          </div>
+          <div class="power-sensor-name" data-power-sensor></div>
+          <div class="power-chart" data-power-chart><div class="chart-loading">Carregando histórico…</div></div>
+        </div>
+      </dialog>
+    `;
+  }
+
   async _handleClick(event) {
     const target = event.target.closest("[data-action]");
     if (!target || target.disabled) return;
@@ -284,6 +310,11 @@ class LightScheduleCard extends HTMLElement {
     try {
       if (action === "toggle-light") {
         await this._hass.callService("homeassistant", "toggle", { entity_id: target.dataset.entityId });
+      } else if (action === "power-history") {
+        await this._openPowerHistory(target.dataset.powerEntityId, target.dataset.lightName);
+      } else if (action === "close-power-dialog") {
+        this._powerDialogElement()?.close();
+        this._render();
       } else if (action === "stop-now") {
         await this._hass.callService("light_scheduler", "stop", { entry_id: this._entryId() });
       } else if (action === "open-zone-dialog") {
@@ -371,6 +402,37 @@ class LightScheduleCard extends HTMLElement {
 
   _zoneDialogElement() {
     return this.shadowRoot.querySelector(".zone-dialog");
+  }
+
+  _powerDialogElement() {
+    return this.shadowRoot.querySelector(".power-dialog");
+  }
+
+  async _openPowerHistory(entityId, lightName) {
+    if (!entityId) return;
+    const dialog = this._powerDialogElement();
+    const host = dialog?.querySelector("[data-power-chart]");
+    if (!dialog || !host) return;
+
+    dialog.querySelector("[data-power-title]").textContent = lightName || "Potência";
+    dialog.querySelector("[data-power-sensor]").textContent = entityId;
+    host.innerHTML = `<div class="chart-loading">Carregando histórico…</div>`;
+    dialog.showModal();
+
+    try {
+      const helpers = await window.loadCardHelpers();
+      const historyCard = await helpers.createCardElement({
+        type: "history-graph",
+        entities: [entityId],
+        hours_to_show: 24,
+      });
+      historyCard.hass = this._hass;
+      if (dialog.open) host.replaceChildren(historyCard);
+    } catch (error) {
+      if (dialog.open) {
+        host.innerHTML = `<div class="chart-error">Não foi possível carregar o gráfico.<small>${this._escape(error?.message || String(error))}</small></div>`;
+      }
+    }
   }
 
   _openZoneDialog() {
@@ -561,8 +623,10 @@ class LightScheduleCard extends HTMLElement {
         .divider { height: 1px; margin: 10px 6px 9px; background: rgba(127,127,127,.16); }
         .section-divider { margin-top: 11px; }
         .lights-grid { display: grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap: 6px; }
-        .light-tile { min-width: 0; height: 52px; padding: 6px 7px; display: grid; grid-template-columns: 30px minmax(0,1fr) auto; align-items: center; gap: 6px; text-align: left; border: 1px solid rgba(127,127,127,.22); border-radius: 7px; background: rgba(127,127,127,.045); cursor: pointer; }
+        .light-tile { min-width: 0; height: 52px; padding: 6px 7px; display: grid; grid-template-columns: minmax(0,1fr) auto; align-items: center; gap: 6px; text-align: left; border: 1px solid rgba(127,127,127,.22); border-radius: 7px; background: rgba(127,127,127,.045); }
         .light-tile:hover { background: rgba(127,127,127,.1); }
+        .light-main { min-width: 0; height: 100%; padding: 0; display: grid; grid-template-columns: 30px minmax(0,1fr); align-items: center; gap: 6px; text-align: left; border: 0; background: transparent; cursor: pointer; }
+        .light-main:disabled { cursor: default; }
         .light-tile .bulb { --mdc-icon-size: 29px; color: #686a6b; filter: grayscale(1); }
         .light-tile.is-on { border-color: rgba(255,196,33,.25); background: linear-gradient(90deg, rgba(255,196,33,.10), rgba(127,127,127,.035)); }
         .light-tile.is-on .bulb { color: var(--ls-amber); filter: drop-shadow(0 0 6px rgba(255,196,33,.55)); }
@@ -571,8 +635,10 @@ class LightScheduleCard extends HTMLElement {
         .light-copy strong { font-size: 11px; line-height: 1.25; }
         .light-copy small { margin-top: 2px; color: var(--secondary-text-color); font-size: 9px; }
         .is-on .light-copy small { color: var(--ls-amber); }
-        .is-unavailable { opacity: .55; cursor: default; }
-        .power-pill { height: 25px; padding: 0 6px; display: inline-flex; align-items: center; white-space: nowrap; border: 1px solid rgba(127,127,127,.35); border-radius: 6px; color: var(--secondary-text-color); font-size: 9px; }
+        .is-unavailable .light-main { opacity: .55; }
+        .power-pill { height: 25px; padding: 0 6px; display: inline-flex; align-items: center; white-space: nowrap; border: 1px solid rgba(127,127,127,.35); border-radius: 6px; color: var(--secondary-text-color); background: transparent; font-size: 9px; cursor: pointer; }
+        .power-pill:hover:not(:disabled) { background: rgba(33,150,243,.10); border-color: var(--ls-blue); }
+        .power-pill:disabled { opacity: .5; cursor: default; }
         .power-pill ha-icon { --mdc-icon-size: 12px; }
         .is-on .power-pill { border-color: rgba(255,196,33,.6); color: var(--ls-amber); background: rgba(255,196,33,.06); }
         .empty-lights { width: 100%; min-height: 52px; padding: 7px 10px; display: grid; grid-template-columns: 25px minmax(0,1fr) 20px; align-items: center; gap: 8px; text-align: left; border: 1px dashed rgba(127,127,127,.45); border-radius: 7px; background: transparent; cursor: pointer; }
@@ -595,6 +661,13 @@ class LightScheduleCard extends HTMLElement {
         .add-button ha-icon { --mdc-icon-size: 17px; }
         dialog { width: min(390px, calc(100vw - 32px)); padding: 0; border: 1px solid rgba(127,127,127,.35); border-radius: 13px; color: var(--primary-text-color); background: var(--card-background-color, #1c1c1c); box-shadow: 0 18px 60px rgba(0,0,0,.5); }
         dialog::backdrop { background: rgba(0,0,0,.62); backdrop-filter: blur(2px); }
+        .power-dialog { width: min(470px, calc(100vw - 32px)); }
+        .power-sensor-name { margin: 4px 0 0 6px; color: var(--secondary-text-color); font-size: 9px; }
+        .power-chart { min-height: 260px; margin-top: 10px; overflow: hidden; border-radius: 7px; }
+        .power-chart > * { display: block; }
+        .chart-loading, .chart-error { min-height: 260px; display: grid; place-items: center; color: var(--secondary-text-color); font-size: 11px; }
+        .chart-error { color: var(--error-color); }
+        .chart-error small { display: block; color: var(--secondary-text-color); }
         .dialog-form { padding: 16px; }
         .dialog-header { display: flex; align-items: center; justify-content: space-between; }
         .dialog-header small { color: var(--secondary-text-color); font-size: 10px; }
@@ -641,7 +714,6 @@ class LightScheduleCard extends HTMLElement {
           .shell { padding-inline: 10px; }
           .summary strong { font-size: 20px; }
           .power-total strong { font-size: 19px; }
-          .light-tile { grid-template-columns: 27px minmax(0,1fr); }
           .power-pill { display: none; }
           .schedule-row { grid-template-columns: 18px 41px 7px 42px 7px minmax(0,1fr) 18px; padding-inline: 6px; }
         }
