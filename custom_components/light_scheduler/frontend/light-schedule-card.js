@@ -1,4 +1,4 @@
-const CARD_VERSION = "0.2.1";
+const CARD_VERSION = "0.2.2";
 
 class LightScheduleCard extends HTMLElement {
   constructor() {
@@ -25,6 +25,11 @@ class LightScheduleCard extends HTMLElement {
 
   set hass(hass) {
     this._hass = hass;
+    if (this._hasOpenDialog()) {
+      this._syncTimer();
+      this._tick();
+      return;
+    }
     this._render();
   }
 
@@ -285,6 +290,7 @@ class LightScheduleCard extends HTMLElement {
         this._openZoneDialog();
       } else if (action === "close-zone-dialog") {
         this._zoneDialogElement()?.close();
+        this._render();
       } else if (action === "save-zone") {
         await this._saveZone();
       } else if (action === "integration-settings") {
@@ -297,6 +303,7 @@ class LightScheduleCard extends HTMLElement {
         this._openDialog(schedule);
       } else if (action === "close-dialog") {
         this._dialog()?.close();
+        this._render();
       } else if (action === "save-schedule") {
         await this._saveSchedule();
       } else if (action === "delete-schedule") {
@@ -342,6 +349,7 @@ class LightScheduleCard extends HTMLElement {
     if (scheduleId) data.id = scheduleId;
     await this._hass.callService("light_scheduler", scheduleId ? "update_schedule" : "add_schedule", data);
     dialog.close();
+    this._render();
   }
 
   async _deleteSchedule() {
@@ -350,10 +358,15 @@ class LightScheduleCard extends HTMLElement {
     if (!scheduleId || !window.confirm("Excluir este agendamento?")) return;
     await this._hass.callService("light_scheduler", "remove_schedule", { entry_id: this._entryId(), id: scheduleId });
     dialog.close();
+    this._render();
   }
 
   _dialog() {
     return this.shadowRoot.querySelector(".schedule-dialog");
+  }
+
+  _hasOpenDialog() {
+    return Boolean(this.shadowRoot?.querySelector("dialog[open]"));
   }
 
   _zoneDialogElement() {
@@ -385,6 +398,7 @@ class LightScheduleCard extends HTMLElement {
       target_entity_ids: targets,
     });
     dialog.close();
+    this._render();
   }
 
   _handleInput(event) {
