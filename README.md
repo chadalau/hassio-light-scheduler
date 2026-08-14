@@ -29,7 +29,7 @@ O card permite:
 - abrir o gráfico das últimas 24 horas clicando na potência individual;
 - acompanhar potência individual e total;
 - ver a próxima ação e o tempo restante da execução;
-- adicionar, editar e excluir agendamentos;
+- adicionar, editar e excluir agendamentos pelos horários de acender e apagar, com duração calculada automaticamente, inclusive ao atravessar a meia-noite;
 - abrir a configuração da zona pelo ícone de engrenagem.
 
 ## Serviços

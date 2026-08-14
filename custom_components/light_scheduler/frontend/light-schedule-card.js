@@ -1,4 +1,4 @@
-const CARD_VERSION = "0.2.3";
+const CARD_VERSION = "0.3.0";
 
 class LightScheduleCard extends HTMLElement {
   constructor() {
@@ -196,10 +196,12 @@ class LightScheduleCard extends HTMLElement {
 
   _scheduleRow(schedule) {
     const id = String(schedule.id || "");
+    const start = schedule.time || schedule.start || "--:--";
+    const end = this._scheduleEnd(schedule);
     return `
       <button class="schedule-row" type="button" data-action="edit-schedule" data-schedule-id="${this._escape(id)}">
         <ha-icon class="clock" icon="mdi:clock-outline"></ha-icon>
-        <strong>${this._escape(schedule.time || schedule.start || "--:--")}</strong>
+        <span class="time-range"><strong>${this._escape(start)}</strong><i>→</i><strong>${this._escape(end)}</strong></span>
         <b>•</b>
         <span class="duration">${this._escape(this._formatDuration(schedule.duration))}</span>
         <b>•</b>
@@ -219,9 +221,10 @@ class LightScheduleCard extends HTMLElement {
           </div>
           <input type="hidden" name="schedule_id">
           <div class="fields">
-            <label>Horário<input name="start" type="time" required value="18:30"></label>
-            <label>Duração (minutos)<input name="duration" type="number" required min="1" max="1440" step="1" value="240"></label>
+            <label>Horário de acender<input name="start" type="time" required value="18:30"></label>
+            <label>Horário de apagar<input name="end" type="time" required value="22:30"></label>
           </div>
+          <div class="duration-preview"><ha-icon icon="mdi:timer-outline"></ha-icon><span>Ficará acesa por <strong data-duration-preview>4h</strong></span></div>
           <fieldset>
             <legend>Dias da semana</legend>
             <div class="day-grid">
@@ -314,14 +317,12 @@ class LightScheduleCard extends HTMLElement {
         await this._openPowerHistory(target.dataset.powerEntityId, target.dataset.lightName);
       } else if (action === "close-power-dialog") {
         this._powerDialogElement()?.close();
-        this._render();
       } else if (action === "stop-now") {
         await this._hass.callService("light_scheduler", "stop", { entry_id: this._entryId() });
       } else if (action === "open-zone-dialog") {
         this._openZoneDialog();
       } else if (action === "close-zone-dialog") {
         this._zoneDialogElement()?.close();
-        this._render();
       } else if (action === "save-zone") {
         await this._saveZone();
       } else if (action === "integration-settings") {
@@ -334,7 +335,6 @@ class LightScheduleCard extends HTMLElement {
         this._openDialog(schedule);
       } else if (action === "close-dialog") {
         this._dialog()?.close();
-        this._render();
       } else if (action === "save-schedule") {
         await this._saveSchedule();
       } else if (action === "delete-schedule") {
@@ -352,12 +352,13 @@ class LightScheduleCard extends HTMLElement {
     form.reset();
     form.elements.schedule_id.value = schedule?.id || "";
     form.elements.start.value = schedule?.time || schedule?.start || "18:30";
-    form.elements.duration.value = Math.max(1, Math.round(Number(schedule?.duration || 14400) / 60));
+    form.elements.end.value = schedule ? this._scheduleEnd(schedule) : "22:30";
     const days = Array.isArray(schedule?.days) ? schedule.days.map(Number) : [0, 1, 2, 3, 4, 5, 6];
     form.querySelectorAll('input[name="day"]').forEach((input) => { input.checked = days.includes(Number(input.value)); });
     dialog.querySelector("[data-dialog-title]").textContent = schedule ? "Editar agendamento" : "Novo agendamento";
     dialog.querySelector("[data-action='delete-schedule']").hidden = !schedule;
     this._showDialogError("");
+    this._updateDurationPreview(form);
     dialog.showModal();
   }
 
@@ -373,7 +374,7 @@ class LightScheduleCard extends HTMLElement {
     const data = {
       entry_id: this._entryId(),
       time: form.elements.start.value,
-      duration: Math.round(Number(form.elements.duration.value) * 60),
+      duration: this._durationBetween(form.elements.start.value, form.elements.end.value),
       days,
     };
     const scheduleId = form.elements.schedule_id.value;
@@ -464,11 +465,53 @@ class LightScheduleCard extends HTMLElement {
   }
 
   _handleInput(event) {
-    if (!event.target.matches("[data-zone-search]")) return;
-    const query = event.target.value.trim().toLocaleLowerCase("pt-BR");
-    this.shadowRoot.querySelectorAll(".entity-option").forEach((option) => {
-      option.hidden = Boolean(query) && !option.dataset.searchValue.includes(query);
-    });
+    if (event.target.matches("[data-zone-search]")) {
+      const query = event.target.value.trim().toLocaleLowerCase("pt-BR");
+      this.shadowRoot.querySelectorAll(".entity-option").forEach((option) => {
+        option.hidden = Boolean(query) && !option.dataset.searchValue.includes(query);
+      });
+      return;
+    }
+    if (event.target.matches('[name="start"], [name="end"]')) {
+      this._updateDurationPreview(event.target.form);
+    }
+  }
+
+  _updateDurationPreview(form) {
+    const output = form?.querySelector("[data-duration-preview]");
+    if (!output) return;
+    output.textContent = this._formatDuration(
+      this._durationBetween(form.elements.start.value, form.elements.end.value)
+    );
+  }
+
+  _durationBetween(start, end) {
+    const startMinutes = this._timeToMinutes(start);
+    const endMinutes = this._timeToMinutes(end);
+    if (startMinutes == null || endMinutes == null) return 1;
+    const minutes = (endMinutes - startMinutes + 1440) % 1440 || 1440;
+    return minutes * 60;
+  }
+
+  _scheduleEnd(schedule) {
+    const startMinutes = this._timeToMinutes(schedule.time || schedule.start);
+    if (startMinutes == null) return "--:--";
+    const durationMinutes = Math.max(1, Math.round(Number(schedule.duration || 0) / 60));
+    return this._minutesToTime(startMinutes + durationMinutes);
+  }
+
+  _timeToMinutes(value) {
+    const match = /^(\d{1,2}):(\d{2})/.exec(String(value || ""));
+    if (!match) return null;
+    const hours = Number(match[1]);
+    const minutes = Number(match[2]);
+    if (hours > 23 || minutes > 59) return null;
+    return hours * 60 + minutes;
+  }
+
+  _minutesToTime(value) {
+    const minutes = ((Number(value) % 1440) + 1440) % 1440;
+    return `${String(Math.floor(minutes / 60)).padStart(2, "0")}:${String(minutes % 60).padStart(2, "0")}`;
   }
 
   _showDialogError(message) {
@@ -648,10 +691,12 @@ class LightScheduleCard extends HTMLElement {
         .empty-lights strong { font-size: 11px; }
         .empty-lights small { margin-top: 2px; color: var(--secondary-text-color); font-size: 9px; }
         .schedules { display: grid; gap: 4px; }
-        .schedule-row { width: 100%; min-width: 0; height: 35px; padding: 0 8px; display: grid; grid-template-columns: 19px 43px 8px 48px 8px minmax(0,1fr) 20px; align-items: center; gap: 3px; text-align: left; border: 1px solid rgba(127,127,127,.22); border-radius: 6px; background: rgba(127,127,127,.04); cursor: pointer; }
+        .schedule-row { width: 100%; min-width: 0; height: 35px; padding: 0 8px; display: grid; grid-template-columns: 19px 104px 8px 48px 8px minmax(0,1fr) 20px; align-items: center; gap: 3px; text-align: left; border: 1px solid rgba(127,127,127,.22); border-radius: 6px; background: rgba(127,127,127,.04); cursor: pointer; }
         .schedule-row:hover { background: rgba(127,127,127,.1); }
         .schedule-row .clock, .schedule-row .edit { --mdc-icon-size: 16px; color: var(--ls-blue); }
         .schedule-row strong { font-size: 11px; }
+        .time-range { display: inline-flex; align-items: center; justify-content: space-between; gap: 4px; white-space: nowrap; }
+        .time-range i { color: var(--ls-blue); font-style: normal; font-size: 10px; }
         .schedule-row b { color: var(--ls-blue); text-align: center; font-size: 10px; }
         .schedule-row .duration, .schedule-row .days { color: var(--secondary-text-color); font-size: 9px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
         .schedule-row .edit { justify-self: end; }
@@ -676,6 +721,9 @@ class LightScheduleCard extends HTMLElement {
         .fields label, fieldset legend { color: var(--secondary-text-color); font-size: 11px; }
         .fields input { width: 100%; height: 39px; margin-top: 5px; padding: 0 10px; border: 1px solid rgba(127,127,127,.4); border-radius: 6px; outline: none; color: var(--primary-text-color); background: rgba(127,127,127,.08); }
         .fields input:focus { border-color: var(--ls-blue); }
+        .duration-preview { margin-top: 10px; padding: 8px 10px; display: flex; align-items: center; gap: 7px; border-radius: 6px; color: var(--secondary-text-color); background: rgba(33,150,243,.08); font-size: 10px; }
+        .duration-preview ha-icon { --mdc-icon-size: 17px; color: var(--ls-blue); }
+        .duration-preview strong { color: var(--primary-text-color); }
         fieldset { margin: 16px 0 0; padding: 0; border: 0; }
         .day-grid { margin-top: 7px; display: grid; grid-template-columns: repeat(7,1fr); gap: 4px; }
         .day-grid input { position: absolute; opacity: 0; pointer-events: none; }
@@ -715,7 +763,7 @@ class LightScheduleCard extends HTMLElement {
           .summary strong { font-size: 20px; }
           .power-total strong { font-size: 19px; }
           .power-pill { display: none; }
-          .schedule-row { grid-template-columns: 18px 41px 7px 42px 7px minmax(0,1fr) 18px; padding-inline: 6px; }
+          .schedule-row { grid-template-columns: 18px 96px 7px 40px 7px minmax(0,1fr) 18px; padding-inline: 6px; }
         }
       </style>
     `;
