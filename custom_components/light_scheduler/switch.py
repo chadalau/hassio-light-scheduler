@@ -18,6 +18,9 @@ class ScheduleEnabledSwitch(SwitchEntity):
         self._attr_device_info = {"identifiers": {(entry.domain, entry.entry_id)}, "name": entry.title}
     @property
     def is_on(self): return self.scheduler.enabled
+    @property
+    def extra_state_attributes(self):
+        return {"entry_id": self.entry.entry_id, "zone_name": self.entry.title}
     async def async_turn_on(self, **kwargs): await self.scheduler.async_set_enabled(True)
     async def async_turn_off(self, **kwargs): await self.scheduler.async_set_enabled(False)
     async def async_added_to_hass(self):

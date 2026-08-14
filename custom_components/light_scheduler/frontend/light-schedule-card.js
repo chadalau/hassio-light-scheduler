@@ -1,4 +1,4 @@
-const CARD_VERSION = "0.2.0";
+const CARD_VERSION = "0.2.1";
 
 class LightScheduleCard extends HTMLElement {
   constructor() {
@@ -8,6 +8,7 @@ class LightScheduleCard extends HTMLElement {
     this._config = {};
     this._timer = undefined;
     this.shadowRoot.addEventListener("click", (event) => this._handleClick(event));
+    this.shadowRoot.addEventListener("input", (event) => this._handleInput(event));
   }
 
   static getStubConfig() {
@@ -42,7 +43,18 @@ class LightScheduleCard extends HTMLElement {
   }
 
   get _state() {
-    return this._hass?.states?.[this._config?.entity];
+    const configured = this._hass?.states?.[this._config?.entity];
+    if (!configured || Array.isArray(configured.attributes?.lights)) {
+      return configured;
+    }
+
+    const entryId = configured.attributes?.entry_id;
+    if (!entryId) return configured;
+    return Object.values(this._hass.states).find(
+      (state) =>
+        state.attributes?.entry_id === entryId &&
+        Array.isArray(state.attributes?.lights)
+    ) || configured;
   }
 
   _render() {
@@ -79,7 +91,7 @@ class LightScheduleCard extends HTMLElement {
               <ha-icon icon="mdi:calendar-check-outline"></ha-icon>
               ${enabled ? "Agendada" : "Pausada"}
             </span>
-            <button class="icon-button settings" type="button" data-action="settings" aria-label="Configurar zona" title="Configurar zona">
+            <button class="icon-button settings" type="button" data-action="open-zone-dialog" aria-label="Configurar zona" title="Configurar zona">
               <ha-icon icon="mdi:cog-outline"></ha-icon>
             </button>
           </header>
@@ -112,6 +124,7 @@ class LightScheduleCard extends HTMLElement {
           </button>
         </section>
         ${this._scheduleDialog()}
+        ${this._zoneDialog()}
       </ha-card>
     `;
 
@@ -157,7 +170,7 @@ class LightScheduleCard extends HTMLElement {
 
   _emptyLights() {
     return `
-      <button class="empty-lights" type="button" data-action="settings">
+      <button class="empty-lights" type="button" data-action="open-zone-dialog">
         <ha-icon icon="mdi:lightbulb-alert-outline"></ha-icon>
         <span><strong>Nenhuma luz configurada</strong><small>Clique aqui para escolher as lâmpadas ou tomadas desta sala.</small></span>
         <ha-icon icon="mdi:chevron-right"></ha-icon>
@@ -211,6 +224,53 @@ class LightScheduleCard extends HTMLElement {
     `;
   }
 
+  _zoneDialog() {
+    const selected = new Set(this._state?.attributes?.target_entity_ids || []);
+    const entities = Object.values(this._hass?.states || {})
+      .filter(
+        (state) =>
+          ["light", "switch"].includes(state.entity_id?.split(".")[0]) &&
+          !state.attributes?.entry_id
+      )
+      .sort((a, b) => (a.attributes?.friendly_name || a.entity_id).localeCompare(b.attributes?.friendly_name || b.entity_id, "pt-BR"));
+    return `
+      <dialog class="zone-dialog">
+        <form method="dialog" class="dialog-form">
+          <div class="dialog-header">
+            <div><small>Configuração da zona</small><h3>Escolher luzes e tomadas</h3></div>
+            <button class="icon-button" type="button" data-action="close-zone-dialog" aria-label="Fechar"><ha-icon icon="mdi:close"></ha-icon></button>
+          </div>
+          <label class="entity-search">
+            <ha-icon icon="mdi:magnify"></ha-icon>
+            <input type="search" data-zone-search placeholder="Pesquisar entidade">
+          </label>
+          <div class="entity-list">
+            ${entities.length ? entities.map((state) => {
+              const entityId = state.entity_id;
+              const name = state.attributes?.friendly_name || entityId;
+              return `
+                <label class="entity-option" data-search-value="${this._escape(`${name} ${entityId}`.toLowerCase())}">
+                  <input type="checkbox" name="zone_target" value="${this._escape(entityId)}" ${selected.has(entityId) ? "checked" : ""}>
+                  <ha-icon icon="${entityId.startsWith("light.") ? "mdi:lightbulb" : "mdi:power-socket"}"></ha-icon>
+                  <span><strong>${this._escape(name)}</strong><small>${this._escape(entityId)}</small></span>
+                  <ha-icon class="check-icon" icon="mdi:check-circle"></ha-icon>
+                </label>
+              `;
+            }).join("") : `<div class="empty-entities">Nenhuma entidade light ou switch encontrada.</div>`}
+          </div>
+          <p class="dialog-error" data-zone-error hidden></p>
+          <div class="zone-help">Os sensores de potência serão associados automaticamente quando estiverem no mesmo dispositivo.</div>
+          <div class="dialog-actions zone-actions">
+            <button class="advanced-button" type="button" data-action="integration-settings">Configuração avançada</button>
+            <span></span>
+            <button class="cancel-button" type="button" data-action="close-zone-dialog">Cancelar</button>
+            <button class="save-button" type="button" data-action="save-zone">Salvar</button>
+          </div>
+        </form>
+      </dialog>
+    `;
+  }
+
   async _handleClick(event) {
     const target = event.target.closest("[data-action]");
     if (!target || target.disabled) return;
@@ -221,7 +281,14 @@ class LightScheduleCard extends HTMLElement {
         await this._hass.callService("homeassistant", "toggle", { entity_id: target.dataset.entityId });
       } else if (action === "stop-now") {
         await this._hass.callService("light_scheduler", "stop", { entry_id: this._entryId() });
-      } else if (action === "settings") {
+      } else if (action === "open-zone-dialog") {
+        this._openZoneDialog();
+      } else if (action === "close-zone-dialog") {
+        this._zoneDialogElement()?.close();
+      } else if (action === "save-zone") {
+        await this._saveZone();
+      } else if (action === "integration-settings") {
+        this._zoneDialogElement()?.close();
         this._navigate("/config/integrations/integration/light_scheduler");
       } else if (action === "add-schedule") {
         this._openDialog();
@@ -287,6 +354,45 @@ class LightScheduleCard extends HTMLElement {
 
   _dialog() {
     return this.shadowRoot.querySelector(".schedule-dialog");
+  }
+
+  _zoneDialogElement() {
+    return this.shadowRoot.querySelector(".zone-dialog");
+  }
+
+  _openZoneDialog() {
+    const dialog = this._zoneDialogElement();
+    if (!dialog) return;
+    const error = dialog.querySelector("[data-zone-error]");
+    if (error) {
+      error.hidden = true;
+      error.textContent = "";
+    }
+    dialog.showModal();
+  }
+
+  async _saveZone() {
+    const dialog = this._zoneDialogElement();
+    const targets = [...dialog.querySelectorAll('input[name="zone_target"]:checked')].map((input) => input.value);
+    const error = dialog.querySelector("[data-zone-error]");
+    if (!targets.length) {
+      error.textContent = "Selecione pelo menos uma luz ou tomada.";
+      error.hidden = false;
+      return;
+    }
+    await this._hass.callService("light_scheduler", "set_zone_options", {
+      entry_id: this._entryId(),
+      target_entity_ids: targets,
+    });
+    dialog.close();
+  }
+
+  _handleInput(event) {
+    if (!event.target.matches("[data-zone-search]")) return;
+    const query = event.target.value.trim().toLocaleLowerCase("pt-BR");
+    this.shadowRoot.querySelectorAll(".entity-option").forEach((option) => {
+      option.hidden = Boolean(query) && !option.dataset.searchValue.includes(query);
+    });
   }
 
   _showDialogError(message) {
@@ -494,6 +600,27 @@ class LightScheduleCard extends HTMLElement {
         .delete-button { display: flex; align-items: center; gap: 5px; padding-left: 0 !important; border: 0; color: var(--error-color); background: transparent; }
         .delete-button[hidden] { display: none; }
         .delete-button ha-icon { --mdc-icon-size: 16px; }
+        .entity-search { height: 39px; margin-top: 14px; padding: 0 10px; display: flex; align-items: center; gap: 7px; border: 1px solid rgba(127,127,127,.4); border-radius: 6px; background: rgba(127,127,127,.08); }
+        .entity-search:focus-within { border-color: var(--ls-blue); }
+        .entity-search ha-icon { --mdc-icon-size: 18px; color: var(--secondary-text-color); }
+        .entity-search input { width: 100%; border: 0; outline: 0; color: var(--primary-text-color); background: transparent; }
+        .entity-list { max-height: min(360px, 48vh); margin-top: 10px; overflow-y: auto; display: grid; gap: 4px; }
+        .entity-option { min-height: 46px; padding: 6px 9px; display: grid; grid-template-columns: 20px 22px minmax(0,1fr) 20px; align-items: center; gap: 7px; border: 1px solid rgba(127,127,127,.2); border-radius: 6px; cursor: pointer; }
+        .entity-option[hidden] { display: none; }
+        .entity-option:hover { background: rgba(127,127,127,.08); }
+        .entity-option input { width: 15px; height: 15px; accent-color: var(--ls-blue); }
+        .entity-option > ha-icon { --mdc-icon-size: 18px; color: var(--secondary-text-color); }
+        .entity-option span { min-width: 0; }
+        .entity-option strong, .entity-option small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .entity-option strong { font-size: 11px; }
+        .entity-option small { margin-top: 2px; color: var(--secondary-text-color); font-size: 9px; }
+        .entity-option .check-icon { color: transparent; }
+        .entity-option:has(input:checked) { border-color: rgba(33,150,243,.55); background: rgba(33,150,243,.08); }
+        .entity-option:has(input:checked) .check-icon { color: var(--ls-blue); }
+        .empty-entities { padding: 16px; color: var(--secondary-text-color); text-align: center; font-size: 11px; }
+        .zone-help { margin-top: 9px; color: var(--secondary-text-color); font-size: 9px; line-height: 1.4; }
+        .zone-actions { grid-template-columns: auto 1fr auto auto; }
+        .advanced-button { padding-left: 0 !important; border: 0; color: var(--ls-blue); background: transparent; font-size: 10px; }
         .cancel-button { border: 1px solid rgba(127,127,127,.35); background: transparent; }
         .save-button { border: 1px solid var(--ls-blue); background: var(--ls-blue); color: white; }
         @media (max-width: 390px) {

@@ -5,9 +5,9 @@
   "config_flow": true,
   "dependencies": ["frontend", "http"],
   "documentation": "https://github.com/chadalau/hassio-light-scheduler",
-  "integration_type": "helper",
+  "integration_type": "device",
   "iot_class": "local_push",
   "issue_tracker": "https://github.com/chadalau/hassio-light-scheduler/issues",
   "requirements": [],
-  "version": "0.2.0"
+  "version": "0.2.1"
 }

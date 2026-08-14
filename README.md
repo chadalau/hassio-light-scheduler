@@ -10,7 +10,7 @@ Integração customizada para Home Assistant que controla todas as luzes de uma 
 4. Procure **Light Scheduler**, informe o nome da sala e selecione todas as luzes ou tomadas dela.
 5. Os sensores de potência são opcionais. Quando possível, a integração os encontra automaticamente no mesmo dispositivo; também é possível escolhê-los manualmente.
 
-As entidades podem ser alteradas depois pelo botão **Configurar** da integração. O ícone de engrenagem no card leva diretamente a essa tela.
+As entidades podem ser alteradas depois diretamente pelo ícone de engrenagem do card. A janela permite pesquisar, marcar várias luzes ou tomadas e salvar a zona sem recriá-la.
 
 ## Card Lovelace
 
@@ -21,7 +21,7 @@ type: custom:light-schedule-card
 entity: sensor.indoor_proxima_execucao
 ```
 
-Use o `entity_id` que existe na sua instalação; ele pode ser copiado em **Ferramentas do desenvolvedor → Estados**.
+Use o `entity_id` que existe na sua instalação; ele pode ser copiado em **Ferramentas do desenvolvedor → Estados**. A partir da versão 0.2.1, o card também aceita o sensor binário **Execução ativa** ou o switch **Agendamento** e localiza automaticamente o sensor completo da mesma zona.
 
 O card permite:
 

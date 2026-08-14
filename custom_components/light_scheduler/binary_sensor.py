@@ -20,5 +20,12 @@ class LightScheduleActive(BinarySensorEntity):
     def is_on(self): return self.scheduler.active
     @property
     def extra_state_attributes(self):
-        return {"started_at": self.scheduler.started_at.isoformat() if self.scheduler.started_at else None, "finishes_at": self.scheduler.finishes_at.isoformat() if self.scheduler.finishes_at else None, "source": self.scheduler.source, "history": self.scheduler.history}
+        return {
+            "entry_id": self.entry.entry_id,
+            "zone_name": self.entry.title,
+            "started_at": self.scheduler.started_at.isoformat() if self.scheduler.started_at else None,
+            "finishes_at": self.scheduler.finishes_at.isoformat() if self.scheduler.finishes_at else None,
+            "source": self.scheduler.source,
+            "history": self.scheduler.history,
+        }
     async def async_added_to_hass(self): self.async_on_remove(async_dispatcher_connect(self.hass, SIGNAL_UPDATE.format(entry_id=self.entry.entry_id), self.async_write_ha_state))
