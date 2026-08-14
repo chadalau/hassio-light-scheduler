@@ -2,17 +2,37 @@
   "config": {
     "step": {
       "user": {
-        "title": "Nova zona de iluminação",
+        "title": "New light zone",
         "data": {
-          "name": "Nome da sala", "target_entity_ids": "Luzes ou tomadas inteligentes", "power_entity_ids": "Sensores de potência das tomadas", "default_duration": "Duração padrão"
+          "name": "Room name",
+          "target_entity_ids": "Lights or smart plugs",
+          "power_entity_ids": "Power sensors (optional)",
+          "default_duration": "Default duration (min)"
+        },
+        "data_description": {
+          "power_entity_ids": "When left empty, Light Scheduler automatically looks for a power sensor on the same device as each light or smart plug."
         }
       }
     },
-    "error": {"no_lights": "Selecione pelo menos uma luz."}
+    "error": {
+      "no_lights": "Select at least one light or smart plug."
+    }
   },
   "entity": {
-    "switch": {"schedule_enabled": {"name": "Agendamento"}},
-    "binary_sensor": {"active": {"name": "Execução ativa"}},
-    "sensor": {"next_run": {"name": "Próxima execução"}}
+    "switch": {
+      "schedule_enabled": {
+        "name": "Schedule enabled"
+      }
+    },
+    "binary_sensor": {
+      "active": {
+        "name": "Active run"
+      }
+    },
+    "sensor": {
+      "next_run": {
+        "name": "Next run"
+      }
+    }
   }
 }

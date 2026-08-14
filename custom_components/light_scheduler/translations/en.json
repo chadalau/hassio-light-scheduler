@@ -1,4 +1,38 @@
 {
-  "config": {"step": {"user": {"title": "New light zone", "data": {"name": "Room name", "target_entity_ids": "Lights or smart plugs", "power_entity_ids": "Smart-plug power sensors", "default_duration": "Default duration (min)"}}}, "error": {"no_lights": "Select at least one light or smart plug."}},
-  "entity": {"switch": {"schedule_enabled": {"name": "Schedule enabled"}}, "binary_sensor": {"active": {"name": "Active run"}}, "sensor": {"next_run": {"name": "Next run"}}}
+  "config": {
+    "step": {
+      "user": {
+        "title": "New light zone",
+        "data": {
+          "name": "Room name",
+          "target_entity_ids": "Lights or smart plugs",
+          "power_entity_ids": "Power sensors (optional)",
+          "default_duration": "Default duration (min)"
+        },
+        "data_description": {
+          "power_entity_ids": "When left empty, Light Scheduler automatically looks for a power sensor on the same device as each light or smart plug."
+        }
+      }
+    },
+    "error": {
+      "no_lights": "Select at least one light or smart plug."
+    }
+  },
+  "entity": {
+    "switch": {
+      "schedule_enabled": {
+        "name": "Schedule enabled"
+      }
+    },
+    "binary_sensor": {
+      "active": {
+        "name": "Active run"
+      }
+    },
+    "sensor": {
+      "next_run": {
+        "name": "Next run"
+      }
+    }
+  }
 }

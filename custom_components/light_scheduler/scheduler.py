@@ -12,7 +12,7 @@ from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.helpers.event import async_track_point_in_time, async_track_state_change_event
 from homeassistant.util import dt as dt_util
 
-from .const import (ACTUATION_GRACE, CONF_DEFAULT_DURATION, CONF_ENABLED, CONF_MAX_DURATION, CONF_POWER_ENTITY_IDS,
+from .const import (CONF_DEFAULT_DURATION, CONF_ENABLED, CONF_MAX_DURATION, CONF_POWER_ENTITY_IDS,
                     CONF_SCHEDULE_DAYS, CONF_SCHEDULE_DURATION, CONF_SCHEDULE_TIME, CONF_SCHEDULES,
                     CONF_TARGET_ENTITY_IDS, HISTORY_MAX_ENTRIES, HISTORY_RETENTION_DAYS, SIGNAL_UPDATE,
                     SOURCE_EXTERNAL, SOURCE_MANUAL, SOURCE_SCHEDULE)
@@ -135,7 +135,9 @@ class LightScheduler:
     async def async_turn_on(self, duration: int | None = None, source: str = SOURCE_MANUAL) -> None:
         """Turn every configured light on for a bounded duration."""
         if self._active:
-            await self.async_stop(); return
+            # Repeated clicks and overlapping schedules must never invert the
+            # current run. The dedicated stop action is the only way to end it.
+            return
         max_duration = int(self.options.get(CONF_MAX_DURATION, 86400))
         seconds = duration if duration is not None else int(self.options.get(CONF_DEFAULT_DURATION, 14400))
         seconds = max(1, min(int(seconds), max_duration))
