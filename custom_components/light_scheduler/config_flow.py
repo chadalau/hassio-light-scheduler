@@ -16,7 +16,7 @@ def _schema(values: dict[str, Any] | None = None) -> vol.Schema:
     return vol.Schema({
         vol.Required(CONF_NAME, default=values.get(CONF_NAME, "Sala")): selector.TextSelector(),
         vol.Required(CONF_TARGET_ENTITY_IDS, default=values.get(CONF_TARGET_ENTITY_IDS, [])): selector.EntitySelector(
-            selector.EntitySelectorConfig(domain="light", multiple=True)),
+            selector.EntitySelectorConfig(domain=["light", "switch"], multiple=True)),
         vol.Optional(CONF_POWER_ENTITY_IDS, default=values.get(CONF_POWER_ENTITY_IDS, [])): selector.EntitySelector(
             selector.EntitySelectorConfig(domain="sensor", multiple=True)),
         vol.Required(CONF_DEFAULT_DURATION, default=int(values.get(CONF_DEFAULT_DURATION, DEFAULT_DEFAULT_DURATION)) // 60): selector.NumberSelector(

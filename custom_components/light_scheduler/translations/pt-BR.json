@@ -1,4 +1,4 @@
 {
-  "config": {"step": {"user": {"title": "Nova zona de iluminação", "data": {"name": "Nome da sala", "target_entity_ids": "Luzes", "power_entity_ids": "Sensores de potência das tomadas", "default_duration": "Duração padrão (min)"}}}, "error": {"no_lights": "Selecione pelo menos uma luz."}},
+  "config": {"step": {"user": {"title": "Nova zona de iluminação", "data": {"name": "Nome da sala", "target_entity_ids": "Luzes ou tomadas inteligentes", "power_entity_ids": "Sensores de potência das tomadas", "default_duration": "Duração padrão (min)"}}}, "error": {"no_lights": "Selecione pelo menos uma luz ou tomada."}},
   "entity": {"switch": {"schedule_enabled": {"name": "Agendamento"}}, "binary_sensor": {"active": {"name": "Execução ativa"}}, "sensor": {"next_run": {"name": "Próxima execução"}}}
 }

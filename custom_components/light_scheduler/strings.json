@@ -4,7 +4,7 @@
       "user": {
         "title": "Nova zona de iluminação",
         "data": {
-          "name": "Nome da sala", "target_entity_ids": "Luzes", "power_entity_ids": "Sensores de potência das tomadas", "default_duration": "Duração padrão"
+          "name": "Nome da sala", "target_entity_ids": "Luzes ou tomadas inteligentes", "power_entity_ids": "Sensores de potência das tomadas", "default_duration": "Duração padrão"
         }
       }
     },

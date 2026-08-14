@@ -7,7 +7,7 @@ Integração customizada para Home Assistant que liga e desliga uma sala inteira
 1. Copie `custom_components/light_scheduler` para a pasta `config/custom_components/` da sua instalação Home Assistant.
 2. Reinicie o Home Assistant.
 3. Em **Configurações → Dispositivos e serviços**, adicione **Light Scheduler**.
-4. Selecione as luzes da sala e, na mesma ordem, os sensores de potência das tomadas. Um sensor de potência é opcional; se faltar, o card exibirá `—` naquela luz.
+4. Selecione as luzes da sala ou os relés/tomadas inteligentes (`switch`) que as controlam e, na mesma ordem, os sensores de potência. Um sensor de potência é opcional; se faltar, o card exibirá `—` naquela luz.
 
 ## Card Lovelace
 

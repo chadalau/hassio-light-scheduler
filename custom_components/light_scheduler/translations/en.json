@@ -1,4 +1,4 @@
 {
-  "config": {"step": {"user": {"title": "New light zone", "data": {"name": "Room name", "target_entity_ids": "Lights", "power_entity_ids": "Smart-plug power sensors", "default_duration": "Default duration (min)"}}}, "error": {"no_lights": "Select at least one light."}},
+  "config": {"step": {"user": {"title": "New light zone", "data": {"name": "Room name", "target_entity_ids": "Lights or smart plugs", "power_entity_ids": "Smart-plug power sensors", "default_duration": "Default duration (min)"}}}, "error": {"no_lights": "Select at least one light or smart plug."}},
   "entity": {"switch": {"schedule_enabled": {"name": "Schedule enabled"}}, "binary_sensor": {"active": {"name": "Active run"}}, "sensor": {"next_run": {"name": "Next run"}}}
 }

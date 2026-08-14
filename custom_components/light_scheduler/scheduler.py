@@ -143,7 +143,9 @@ class LightScheduler:
         if not targets:
             _LOGGER.warning("No available lights in %s", self.entry.title)
             self._schedule_next(); return
-        await self.hass.services.async_call("light", "turn_on", {"entity_id": targets}, blocking=True)
+        # ``homeassistant.turn_on`` supports both native ``light`` entities
+        # and the smart-plug/relay ``switch`` entities used by many lamps.
+        await self.hass.services.async_call("homeassistant", "turn_on", {"entity_id": targets}, blocking=True)
         self._active, self._source = True, source
         self._started_at = dt_util.utcnow()
         self._finishes_at = self._started_at + timedelta(seconds=seconds)
@@ -161,7 +163,7 @@ class LightScheduler:
             return
         if self._unsub_finish:
             self._unsub_finish(); self._unsub_finish = None
-        await self.hass.services.async_call("light", "turn_off", {"entity_id": self.target_entity_ids}, blocking=True)
+        await self.hass.services.async_call("homeassistant", "turn_off", {"entity_id": self.target_entity_ids}, blocking=True)
         started, source = self._started_at, self._source
         finished = dt_util.utcnow()
         self._history.append({"started_at": started.isoformat() if started else None, "finished_at": finished.isoformat(),
