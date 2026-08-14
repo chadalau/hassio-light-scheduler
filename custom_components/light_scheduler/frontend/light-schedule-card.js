@@ -1,4 +1,4 @@
-const CARD_VERSION = "0.5.0";
+const CARD_VERSION = "0.5.1";
 
 class LightScheduleCard extends HTMLElement {
   constructor() {
@@ -298,8 +298,14 @@ class LightScheduleCard extends HTMLElement {
       <div class="mapping-row" data-mapping-row>
         <span class="mapping-order">${index + 1}</span>
         <input class="mapping-name" name="mapping_name" type="text" value="${this._escape(name)}" placeholder="Nome" aria-label="Nome da entrada ${index + 1}">
-        <select name="mapping_target" aria-label="Luz ou interruptor da entrada ${index + 1}">${this._targetOptions(target)}</select>
-        <select name="mapping_power" aria-label="Potência da entrada ${index + 1}">${this._powerOptions(power)}</select>
+        <div class="selector-stack">
+          <input class="selector-search" type="search" data-filter-select="mapping_target" placeholder="Pesquisar luz…" aria-label="Pesquisar luz da entrada ${index + 1}">
+          <select name="mapping_target" aria-label="Luz ou interruptor da entrada ${index + 1}">${this._targetOptions(target)}</select>
+        </div>
+        <div class="selector-stack">
+          <input class="selector-search" type="search" data-filter-select="mapping_power" placeholder="Pesquisar potência…" aria-label="Pesquisar potência da entrada ${index + 1}">
+          <select name="mapping_power" aria-label="Potência da entrada ${index + 1}">${this._powerOptions(power)}</select>
+        </div>
         <button class="remove-mapping-button" type="button" data-action="remove-mapping-row" aria-label="Remover entrada ${index + 1}" title="Remover"><ha-icon icon="mdi:delete-outline"></ha-icon></button>
       </div>
     `;
@@ -311,7 +317,7 @@ class LightScheduleCard extends HTMLElement {
       .sort((a, b) => (a.attributes?.friendly_name || a.entity_id).localeCompare(b.attributes?.friendly_name || b.entity_id, "pt-BR"));
     return `<option value="">Selecionar luz…</option>${entities.map((state) => {
       const name = state.attributes?.friendly_name || state.entity_id;
-      return `<option value="${this._escape(state.entity_id)}" ${state.entity_id === selected ? "selected" : ""}>${this._escape(name)}</option>`;
+      return `<option value="${this._escape(state.entity_id)}" data-search="${this._escape(`${name} ${state.entity_id}`.toLocaleLowerCase("pt-BR"))}" ${state.entity_id === selected ? "selected" : ""}>${this._escape(name)} — ${this._escape(state.entity_id)}</option>`;
     }).join("")}`;
   }
 
@@ -325,7 +331,7 @@ class LightScheduleCard extends HTMLElement {
       .sort((a, b) => (a.attributes?.friendly_name || a.entity_id).localeCompare(b.attributes?.friendly_name || b.entity_id, "pt-BR"));
     return `<option value="">Automático / nenhum</option>${entities.map((state) => {
       const name = state.attributes?.friendly_name || state.entity_id;
-      return `<option value="${this._escape(state.entity_id)}" ${state.entity_id === selected ? "selected" : ""}>${this._escape(name)}</option>`;
+      return `<option value="${this._escape(state.entity_id)}" data-search="${this._escape(`${name} ${state.entity_id}`.toLocaleLowerCase("pt-BR"))}" ${state.entity_id === selected ? "selected" : ""}>${this._escape(name)} — ${this._escape(state.entity_id)}</option>`;
     }).join("")}`;
   }
 
@@ -520,6 +526,15 @@ class LightScheduleCard extends HTMLElement {
   }
 
   _handleInput(event) {
+    if (event.target.matches("[data-filter-select]")) {
+      const row = event.target.closest("[data-mapping-row]");
+      const select = row?.querySelector(`[name="${event.target.dataset.filterSelect}"]`);
+      const query = event.target.value.trim().toLocaleLowerCase("pt-BR");
+      select?.querySelectorAll("option").forEach((option) => {
+        option.hidden = Boolean(option.value && query && !option.dataset.search?.includes(query));
+      });
+      return;
+    }
     if (event.target.matches('[name="start"], [name="end"]')) {
       this._updateDurationPreview(event.target.form);
     }
@@ -828,10 +843,13 @@ class LightScheduleCard extends HTMLElement {
         .mapping-header, .mapping-row { display: grid; grid-template-columns: 24px minmax(90px,.7fr) minmax(140px,1.2fr) minmax(130px,1fr) 28px; align-items: center; gap: 6px; }
         .mapping-header { padding: 0 8px 5px; color: var(--secondary-text-color); font-size: 9px; }
         .mapping-list { max-height: min(390px, 48vh); overflow-y: auto; display: grid; gap: 5px; }
-        .mapping-row { min-height: 48px; padding: 6px 7px; border: 1px solid rgba(127,127,127,.23); border-radius: 7px; background: rgba(127,127,127,.035); }
+        .mapping-row { min-height: 76px; padding: 6px 7px; border: 1px solid rgba(127,127,127,.23); border-radius: 7px; background: rgba(127,127,127,.035); }
         .mapping-order { width: 22px; height: 22px; display: grid; place-items: center; border-radius: 50%; color: var(--secondary-text-color); background: rgba(127,127,127,.14); font-size: 9px; }
         .mapping-row input, .mapping-row select { width: 100%; min-width: 0; height: 34px; padding: 0 8px; overflow: hidden; text-overflow: ellipsis; border: 1px solid rgba(127,127,127,.32); border-radius: 5px; outline: 0; color: var(--primary-text-color); background: var(--card-background-color, #1c1c1c); font-size: 10px; }
         .mapping-row input:focus, .mapping-row select:focus { border-color: var(--ls-blue); }
+        .selector-stack { min-width: 0; display: grid; gap: 4px; }
+        .mapping-row .selector-search { height: 26px; padding-inline: 7px; color: var(--secondary-text-color); font-size: 9px; background: rgba(127,127,127,.055); }
+        .mapping-row .selector-search:focus { color: var(--primary-text-color); }
         .remove-mapping-button { width: 28px; height: 28px; padding: 0; display: grid; place-items: center; border: 0; border-radius: 50%; color: var(--secondary-text-color); background: transparent; cursor: pointer; }
         .remove-mapping-button:hover { color: var(--error-color); background: rgba(255,80,80,.08); }
         .remove-mapping-button ha-icon { --mdc-icon-size: 17px; }
@@ -855,8 +873,8 @@ class LightScheduleCard extends HTMLElement {
           .mapping-row { grid-template-columns: 24px minmax(0,1fr) minmax(0,1fr) 28px; }
           .mapping-order { grid-row: 1 / 3; }
           .mapping-name { grid-column: 2 / 4; }
-          .mapping-row select[name="mapping_target"] { grid-column: 2; }
-          .mapping-row select[name="mapping_power"] { grid-column: 3; }
+          .mapping-row .selector-stack:first-of-type { grid-column: 2; }
+          .mapping-row .selector-stack:last-of-type { grid-column: 3; }
           .remove-mapping-button { grid-column: 4; grid-row: 1 / 3; }
         }
       </style>
