@@ -18,6 +18,25 @@
       "no_lights": "Selecione pelo menos uma luz ou tomada."
     }
   },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Editar zona de iluminação",
+        "data": {
+          "name": "Nome da sala",
+          "target_entity_ids": "Luzes ou tomadas inteligentes",
+          "power_entity_ids": "Sensores de potência (opcional)",
+          "default_duration": "Duração padrão (min)"
+        },
+        "data_description": {
+          "power_entity_ids": "As associações existentes são preservadas quando possível. Use o card para escolher o sensor exato de cada luz."
+        }
+      }
+    },
+    "error": {
+      "no_lights": "Selecione pelo menos uma luz ou tomada."
+    }
+  },
   "entity": {
     "switch": {
       "schedule_enabled": {

@@ -42,6 +42,7 @@ class LightScheduleStatus(SensorEntity):
         }
         self._watched_entities: tuple[str, ...] = ()
         self._unsub_state_listener: Callable[[], None] | None = None
+        self._cached_power_mapping: dict[str, str] | None = None
 
     @property
     def native_value(self) -> str | None:
@@ -57,6 +58,9 @@ class LightScheduleStatus(SensorEntity):
         sensor was selected, a sensor with device_class=power on the same device
         is discovered automatically.
         """
+        if self._cached_power_mapping is not None:
+            return dict(self._cached_power_mapping)
+
         registry = er.async_get(self.hass)
         targets = self.scheduler.target_entity_ids
         explicit = self.scheduler.power_entity_ids
@@ -94,7 +98,11 @@ class LightScheduleStatus(SensorEntity):
                 else []
             )
             selected = configured.get(target_id)
-            if selected in used:
+            selected_state = self.hass.states.get(selected) if selected else None
+            if selected in used or selected_state is None or not (
+                selected_state.attributes.get("device_class") == "power"
+                or selected_state.attributes.get("unit_of_measurement") in POWER_UNITS
+            ):
                 selected = None
             if selected is None:
                 selected = next(
@@ -121,7 +129,8 @@ class LightScheduleStatus(SensorEntity):
             if selected:
                 mapping[target_id] = selected
                 used.add(selected)
-        return mapping
+        self._cached_power_mapping = mapping
+        return dict(mapping)
 
     def _power_watts(self, entity_id: str | None) -> float | None:
         """Return a power sensor value normalized to watts."""
@@ -210,6 +219,7 @@ class LightScheduleStatus(SensorEntity):
 
     @callback
     def _handle_update(self) -> None:
+        self._cached_power_mapping = None
         self._refresh_state_listener()
         self.async_write_ha_state()
 
@@ -224,11 +234,19 @@ class LightScheduleStatus(SensorEntity):
         self._watched_entities = watched
         self._unsub_state_listener = (
             async_track_state_change_event(
-                self.hass, list(watched), lambda _: self.async_write_ha_state()
+                self.hass, list(watched), self._handle_watched_state
             )
             if watched
             else None
         )
+
+    @callback
+    def _handle_watched_state(self, event: Any) -> None:
+        """Refresh mapping if a configured sensor disappears."""
+        if event.data.get("new_state") is None:
+            self._cached_power_mapping = None
+            self._refresh_state_listener()
+        self.async_write_ha_state()
 
     @callback
     def _remove_state_listener(self) -> None:

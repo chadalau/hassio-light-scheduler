@@ -39,27 +39,58 @@ def _build_mappings(
     powers: list[str],
     existing: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, str]]:
-    """Build ordered mappings while preserving existing custom names."""
+    """Build ordered mappings without changing existing target/power pairs."""
     existing_by_target = {
         item.get("target_entity_id"): item
         for item in (existing or [])
         if isinstance(item, dict) and item.get("target_entity_id")
     }
-    return [
-        {
-            "name": str(existing_by_target.get(target, {}).get("name") or ""),
-            "target_entity_id": target,
-            "power_entity_id": powers[index] if index < len(powers) else "",
-        }
-        for index, target in enumerate(targets)
-    ]
+    retained_powers = {
+        str(item.get("power_entity_id"))
+        for target, item in existing_by_target.items()
+        if target in targets
+        and item.get("power_entity_id") in powers
+    }
+    available_powers = [power for power in powers if power not in retained_powers]
+    result: list[dict[str, str]] = []
+    used_powers: set[str] = set()
+    for target in targets:
+        existing_item = existing_by_target.get(target, {})
+        existing_power = str(existing_item.get("power_entity_id") or "")
+        power = (
+            existing_power
+            if existing_power in powers and existing_power not in used_powers
+            else ""
+        )
+        if not power and available_powers:
+            power = available_powers.pop(0)
+        if power:
+            used_powers.add(power)
+        result.append(
+            {
+                "name": str(existing_item.get("name") or ""),
+                "target_entity_id": target,
+                "power_entity_id": power,
+            }
+        )
+    return result
 
 
 def _schema(values: dict[str, Any] | None = None, *, persisted: bool = False) -> vol.Schema:
     """Build the zone form with safe initial values."""
+    supplied_values = values is not None
     values = values or {}
-    raw_duration = int(values.get(CONF_DEFAULT_DURATION, DEFAULT_DEFAULT_DURATION))
-    duration_minutes = max(1, raw_duration // 60) if persisted else max(1, raw_duration)
+    default_duration = (
+        DEFAULT_DEFAULT_DURATION
+        if persisted or supplied_values
+        else DEFAULT_DEFAULT_DURATION // 60
+    )
+    raw_duration = float(values.get(CONF_DEFAULT_DURATION, default_duration))
+    duration_minutes = (
+        max(1 / 60, raw_duration / 60)
+        if persisted
+        else max(1 / 60, raw_duration)
+    )
     return vol.Schema(
         {
             vol.Required(CONF_NAME, default=values.get(CONF_NAME, "Sala")): (
@@ -84,8 +115,9 @@ def _schema(values: dict[str, Any] | None = None, *, persisted: bool = False) ->
             ): selector.NumberSelector(
                 selector.NumberSelectorConfig(
                     mode=selector.NumberSelectorMode.BOX,
-                    min=1,
+                    min=1 / 60,
                     max=1440,
+                    step=1 / 60,
                     unit_of_measurement="min",
                 )
             ),
@@ -122,10 +154,9 @@ class LightSchedulerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         CONF_ENTITY_MAPPINGS: _build_mappings(
                             targets, power_ids
                         ),
-                        CONF_DEFAULT_DURATION: int(
-                            user_input[CONF_DEFAULT_DURATION]
-                        )
-                        * 60,
+                        CONF_DEFAULT_DURATION: round(
+                            float(user_input[CONF_DEFAULT_DURATION]) * 60
+                        ),
                         CONF_MAX_DURATION: DEFAULT_MAX_DURATION,
                         CONF_SCHEDULES: [],
                     },
@@ -168,15 +199,19 @@ class LightSchedulerOptionsFlow(config_entries.OptionsFlow):
                     power_ids,
                     self.config_entry.options.get(CONF_ENTITY_MAPPINGS, []),
                 ),
-                CONF_DEFAULT_DURATION: int(user_input[CONF_DEFAULT_DURATION]) * 60,
+                CONF_DEFAULT_DURATION: round(
+                    float(user_input[CONF_DEFAULT_DURATION]) * 60
+                ),
             }
+            # OptionsFlowManager persists the data returned by
+            # async_create_entry as the entry options. Updating options here
+            # and then returning an empty dict would erase the submitted form.
             self.hass.config_entries.async_update_entry(
                 self.config_entry,
                 title=name,
                 data={CONF_NAME: name},
-                options=options,
             )
-            return self.async_create_entry(title="", data={})
+            return self.async_create_entry(title="", data=options)
 
         values = {
             **self.config_entry.options,

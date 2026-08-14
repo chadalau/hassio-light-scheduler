@@ -92,12 +92,15 @@ def _service_data(call: ServiceCall) -> dict[str, Any]:
     return data
 
 
-def _normalize_mappings(value: Any) -> list[dict[str, str]]:
+def _normalize_mappings(
+    hass: HomeAssistant, value: Any
+) -> list[dict[str, str]]:
     """Validate ordered light-to-power mappings received from the card."""
     if not isinstance(value, list) or not value:
         raise ServiceValidationError("Adicione pelo menos uma entrada de luz.")
     result: list[dict[str, str]] = []
     used_targets: set[str] = set()
+    used_powers: set[str] = set()
     for raw in value:
         if not isinstance(raw, dict):
             raise ServiceValidationError("Entrada de luz inválida.")
@@ -114,7 +117,21 @@ def _normalize_mappings(value: Any) -> list[dict[str, str]]:
             raise ServiceValidationError(
                 "O medidor de potência precisa ser uma entidade sensor."
             )
+        if power in used_powers:
+            raise ServiceValidationError(
+                f"Medidor de potência repetido: {power}"
+            )
+        power_state = hass.states.get(power) if power else None
+        if power_state and not (
+            power_state.attributes.get("device_class") == "power"
+            or power_state.attributes.get("unit_of_measurement") in ("W", "kW")
+        ):
+            raise ServiceValidationError(
+                f"A entidade {power} não é um sensor de potência."
+            )
         used_targets.add(target)
+        if power:
+            used_powers.add(power)
         result.append(
             {
                 "name": name,
@@ -122,6 +139,37 @@ def _normalize_mappings(value: Any) -> list[dict[str, str]]:
                 "power_entity_id": power,
             }
         )
+    return result
+
+
+def _validated_schedule(value: Any) -> dict[str, Any]:
+    """Validate service schedule input with a user-facing error."""
+    if not isinstance(value, dict):
+        raise ServiceValidationError("Cada agendamento precisa ser um objeto.")
+    try:
+        return new_schedule(SCHEDULE_SCHEMA(value))
+    except vol.Invalid as err:
+        raise ServiceValidationError(str(err)) from err
+
+
+def _normalize_entity_ids(
+    value: Any, domains: tuple[str, ...], *, required: bool = False
+) -> list[str]:
+    """Validate and deduplicate a service entity list."""
+    raw = [value] if isinstance(value, str) else value
+    if not isinstance(raw, list):
+        raise ServiceValidationError("A seleção de entidades precisa ser uma lista.")
+    result: list[str] = []
+    for item in raw:
+        entity_id = str(item or "").strip()
+        if not entity_id.startswith(tuple(f"{domain}." for domain in domains)):
+            raise ServiceValidationError(
+                f"Entidade inválida para esta seleção: {entity_id or '(vazia)'}"
+            )
+        if entity_id not in result:
+            result.append(entity_id)
+    if required and not result:
+        raise ServiceValidationError("Adicione pelo menos uma luz ou tomada.")
     return result
 
 
@@ -136,6 +184,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up one configured light zone."""
     await _register_services(hass)
+    await _register_frontend(hass)
     store = hass.data.setdefault(DOMAIN, {}).setdefault("store", RuntimeStore(hass))
     scheduler = LightScheduler(hass, entry, store)
     await scheduler.async_setup()
@@ -171,16 +220,28 @@ async def _register_frontend(hass: HomeAssistant) -> None:
     )
     if not js_path.is_file():
         return
-    await hass.http.async_register_static_paths(
-        [StaticPathConfig(CARD_JS_URL, str(js_path), cache_headers=False)]
-    )
-    if hass.data.get(DATA_EXTRA_MODULE_URL) is not None:
+    domain_data = hass.data.setdefault(DOMAIN, {})
+    if not domain_data.get("frontend_path_registered"):
+        await hass.http.async_register_static_paths(
+            [StaticPathConfig(CARD_JS_URL, str(js_path), cache_headers=False)]
+        )
+        domain_data["frontend_path_registered"] = True
+    if (
+        hass.data.get(DATA_EXTRA_MODULE_URL) is not None
+        and not domain_data.get("frontend_module_registered")
+    ):
         add_extra_js_url(hass, CARD_JS_URL)
+        domain_data["frontend_module_registered"] = True
 
 
 def _unregister_frontend(hass: HomeAssistant) -> None:
-    if hass.data.get(DATA_EXTRA_MODULE_URL) is not None:
+    domain_data = hass.data.setdefault(DOMAIN, {})
+    if (
+        hass.data.get(DATA_EXTRA_MODULE_URL) is not None
+        and domain_data.get("frontend_module_registered")
+    ):
         remove_extra_js_url(hass, CARD_JS_URL)
+        domain_data["frontend_module_registered"] = False
 
 
 async def _resolve(
@@ -204,6 +265,9 @@ async def _resolve(
                 found.append(entry.runtime_data)
         if found:
             return found
+        raise ServiceValidationError(
+            "A zona informada em entry_id não existe ou não está carregada."
+        )
 
     selected = async_extract_referenced_entity_ids(
         hass, TargetSelection(call.data)
@@ -262,7 +326,7 @@ async def _register_services(hass: HomeAssistant) -> None:
             await scheduler.async_stop()
 
     async def add(call: ServiceCall) -> None:
-        schedule = new_schedule(SCHEDULE_SCHEMA(_service_data(call)))
+        schedule = _validated_schedule(_service_data(call))
         for scheduler in await _resolve(hass, call):
             options = {
                 **scheduler.options,
@@ -299,9 +363,7 @@ async def _register_services(hass: HomeAssistant) -> None:
         raw_schedules = _service_data(call).get(CONF_SCHEDULES, [])
         if not isinstance(raw_schedules, list):
             raise ServiceValidationError("schedules deve ser uma lista")
-        schedules = [
-            new_schedule(SCHEDULE_SCHEMA(value)) for value in raw_schedules
-        ]
+        schedules = [_validated_schedule(value) for value in raw_schedules]
         for scheduler in await _resolve(hass, call):
             await _update_options(
                 hass,
@@ -321,23 +383,26 @@ async def _register_services(hass: HomeAssistant) -> None:
             CONF_SCHEDULE_INTERVAL,
             CONF_ENABLED,
         }
+        unknown = set(data) - allowed
+        if unknown:
+            raise ServiceValidationError(
+                f"Campos desconhecidos: {', '.join(sorted(unknown))}"
+            )
         patch = {key: value for key, value in data.items() if key in allowed}
+        if not patch:
+            raise ServiceValidationError(
+                "Informe pelo menos um campo para alterar o agendamento."
+            )
         for scheduler in await _resolve(hass, call):
             schedules: list[dict[str, Any]] = []
             matched = False
             for schedule in scheduler.options.get(CONF_SCHEDULES, []):
                 if schedule.get(CONF_SCHEDULE_ID) == schedule_id:
-                    schedules.append(
-                        new_schedule(
-                            SCHEDULE_SCHEMA(
-                                {
-                                    **schedule,
-                                    **patch,
-                                    CONF_SCHEDULE_ID: schedule_id,
-                                }
-                            )
-                        )
-                    )
+                    schedules.append(_validated_schedule({
+                        **schedule,
+                        **patch,
+                        CONF_SCHEDULE_ID: schedule_id,
+                    }))
                     matched = True
                 else:
                     schedules.append(schedule)
@@ -353,10 +418,25 @@ async def _register_services(hass: HomeAssistant) -> None:
 
     async def set_options(call: ServiceCall) -> None:
         data = _service_data(call)
+        allowed = {
+            CONF_ENTITY_MAPPINGS,
+            CONF_DEFAULT_DURATION,
+            CONF_TARGET_ENTITY_IDS,
+            CONF_POWER_ENTITY_IDS,
+        }
+        unknown = set(data) - allowed
+        if unknown:
+            raise ServiceValidationError(
+                f"Campos desconhecidos: {', '.join(sorted(unknown))}"
+            )
+        if not data:
+            raise ServiceValidationError(
+                "Informe pelo menos uma opção para alterar a zona."
+            )
         for scheduler in await _resolve(hass, call):
             options = dict(scheduler.options)
             if CONF_ENTITY_MAPPINGS in data:
-                mappings = _normalize_mappings(data[CONF_ENTITY_MAPPINGS])
+                mappings = _normalize_mappings(hass, data[CONF_ENTITY_MAPPINGS])
                 options[CONF_ENTITY_MAPPINGS] = mappings
                 options[CONF_TARGET_ENTITY_IDS] = [
                     item["target_entity_id"] for item in mappings
@@ -366,13 +446,55 @@ async def _register_services(hass: HomeAssistant) -> None:
                     for item in mappings
                     if item["power_entity_id"]
                 ]
-            for key in (
-                CONF_DEFAULT_DURATION,
-                CONF_TARGET_ENTITY_IDS,
-                CONF_POWER_ENTITY_IDS,
-            ):
-                if key in data and CONF_ENTITY_MAPPINGS not in data:
-                    options[key] = data[key]
+            elif CONF_TARGET_ENTITY_IDS in data or CONF_POWER_ENTITY_IDS in data:
+                targets = _normalize_entity_ids(
+                    data.get(CONF_TARGET_ENTITY_IDS, scheduler.target_entity_ids),
+                    ("light", "switch"),
+                    required=True,
+                )
+                powers = _normalize_entity_ids(
+                    data.get(CONF_POWER_ENTITY_IDS, scheduler.power_entity_ids),
+                    ("sensor",),
+                )
+                existing = {
+                    item.get("target_entity_id"): item
+                    for item in scheduler.entity_mappings
+                }
+                retained_powers = {
+                    str(item.get("power_entity_id"))
+                    for target, item in existing.items()
+                    if target in targets and item.get("power_entity_id") in powers
+                }
+                available_powers = [
+                    power for power in powers if power not in retained_powers
+                ]
+                mappings = []
+                for target in targets:
+                    old = existing.get(target, {})
+                    old_power = str(old.get("power_entity_id") or "")
+                    power = old_power if old_power in powers else ""
+                    if not power and available_powers:
+                        power = available_powers.pop(0)
+                    mappings.append({
+                        "name": str(old.get("name") or ""),
+                        "target_entity_id": target,
+                        "power_entity_id": power,
+                    })
+                mappings = _normalize_mappings(hass, mappings)
+                options[CONF_ENTITY_MAPPINGS] = mappings
+                options[CONF_TARGET_ENTITY_IDS] = targets
+                options[CONF_POWER_ENTITY_IDS] = [
+                    item["power_entity_id"] for item in mappings
+                    if item["power_entity_id"]
+                ]
+            if CONF_DEFAULT_DURATION in data:
+                try:
+                    options[CONF_DEFAULT_DURATION] = vol.All(
+                        vol.Coerce(int),
+                        vol.Range(min=MIN_DURATION, max=MAX_SCHEDULE_DURATION),
+                    )(data[CONF_DEFAULT_DURATION])
+                except vol.Invalid as err:
+                    raise ServiceValidationError(str(err)) from err
             await _update_options(hass, scheduler, options)
 
     handlers = (

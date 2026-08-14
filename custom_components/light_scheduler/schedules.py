@@ -13,7 +13,7 @@ def serialize_schedule(schedule: dict[str, Any]) -> dict[str, Any]:
     result = dict(schedule)
     value = result.get(CONF_SCHEDULE_TIME)
     if isinstance(value, time):
-        result[CONF_SCHEDULE_TIME] = value.isoformat()
+        result[CONF_SCHEDULE_TIME] = value.strftime("%H:%M")
     result[CONF_SCHEDULE_DAYS] = [int(day) for day in result[CONF_SCHEDULE_DAYS]]
     result[CONF_SCHEDULE_DURATION] = int(result[CONF_SCHEDULE_DURATION])
     result[CONF_SCHEDULE_INTERVAL] = int(result.get(CONF_SCHEDULE_INTERVAL, 0))

@@ -1,4 +1,4 @@
-const CARD_VERSION = "0.5.1";
+const CARD_VERSION = "0.6.0";
 
 class LightScheduleCard extends HTMLElement {
   constructor() {
@@ -7,8 +7,12 @@ class LightScheduleCard extends HTMLElement {
     this._hass = undefined;
     this._config = {};
     this._timer = undefined;
+    this._powerLoadId = 0;
     this.shadowRoot.addEventListener("click", (event) => this._handleClick(event));
     this.shadowRoot.addEventListener("input", (event) => this._handleInput(event));
+    this.shadowRoot.addEventListener("focusin", (event) => this._handleFocusIn(event));
+    this.shadowRoot.addEventListener("focusout", (event) => this._handleFocusOut(event));
+    this.shadowRoot.addEventListener("keydown", (event) => this._handleKeyDown(event));
   }
 
   static getStubConfig() {
@@ -24,10 +28,17 @@ class LightScheduleCard extends HTMLElement {
   }
 
   set hass(hass) {
+    const previousState = this._state;
     this._hass = hass;
+    const currentState = this._state;
     if (this._hasOpenDialog()) {
       const historyCard = this.shadowRoot.querySelector("[data-power-chart] > *");
       if (historyCard) historyCard.hass = hass;
+      this._syncTimer();
+      this._tick();
+      return;
+    }
+    if (previousState && previousState === currentState && this.shadowRoot.querySelector("ha-card")) {
       this._syncTimer();
       this._tick();
       return;
@@ -205,7 +216,7 @@ class LightScheduleCard extends HTMLElement {
     const end = this._scheduleEnd(schedule);
     const interval = Math.max(0, Number(schedule.interval || 0));
     return `
-      <button class="schedule-row" type="button" data-action="edit-schedule" data-schedule-id="${this._escape(id)}">
+      <button class="schedule-row ${schedule.enabled === false ? "is-disabled" : ""}" type="button" data-action="edit-schedule" data-schedule-id="${this._escape(id)}">
         <ha-icon class="clock" icon="mdi:clock-outline"></ha-icon>
         <span class="time-range"><strong>${this._escape(start)}</strong><i>→</i><strong>${this._escape(end)}</strong></span>
         <b>•</b>
@@ -227,13 +238,17 @@ class LightScheduleCard extends HTMLElement {
           </div>
           <input type="hidden" name="schedule_id">
           <div class="fields">
-            <label>Horário de acender<input name="start" type="time" required value="18:30"></label>
-            <label>Horário de apagar<input name="end" type="time" required value="22:30"></label>
+            <label>Horário de acender<input name="start" type="time" step="1" required value="18:30"></label>
+            <label>Horário de apagar<input name="end" type="time" step="1" required value="22:30"></label>
           </div>
           <div class="duration-preview"><ha-icon icon="mdi:timer-outline"></ha-icon><span>Ficará acesa por <strong data-duration-preview>4h</strong></span></div>
           <label class="interval-setting">
             <span><strong>Intervalo entre as luzes</strong><small>Aplicado ao acender e apagar, na mesma ordem. Use 0 para acionar todas juntas.</small></span>
             <span class="interval-input"><input name="interval" type="number" min="0" max="300" step="1" value="0" required><b>seg</b></span>
+          </label>
+          <label class="schedule-enabled">
+            <input name="enabled" type="checkbox" checked>
+            <span><strong>Agendamento ativo</strong><small>Desmarque para pausar este horário sem excluí-lo.</small></span>
           </label>
           <fieldset>
             <legend>Dias da semana</legend>
@@ -298,41 +313,64 @@ class LightScheduleCard extends HTMLElement {
       <div class="mapping-row" data-mapping-row>
         <span class="mapping-order">${index + 1}</span>
         <input class="mapping-name" name="mapping_name" type="text" value="${this._escape(name)}" placeholder="Nome" aria-label="Nome da entrada ${index + 1}">
-        <div class="selector-stack">
-          <input class="selector-search" type="search" data-filter-select="mapping_target" placeholder="Pesquisar luz…" aria-label="Pesquisar luz da entrada ${index + 1}">
-          <select name="mapping_target" aria-label="Luz ou interruptor da entrada ${index + 1}">${this._targetOptions(target)}</select>
-        </div>
-        <div class="selector-stack">
-          <input class="selector-search" type="search" data-filter-select="mapping_power" placeholder="Pesquisar potência…" aria-label="Pesquisar potência da entrada ${index + 1}">
-          <select name="mapping_power" aria-label="Potência da entrada ${index + 1}">${this._powerOptions(power)}</select>
-        </div>
+        ${this._entityAutocomplete("target", target, index)}
+        ${this._entityAutocomplete("power", power, index)}
         <button class="remove-mapping-button" type="button" data-action="remove-mapping-row" aria-label="Remover entrada ${index + 1}" title="Remover"><ha-icon icon="mdi:delete-outline"></ha-icon></button>
       </div>
     `;
   }
 
-  _targetOptions(selected = "") {
-    const entities = Object.values(this._hass?.states || {})
-      .filter((state) => ["light", "switch"].includes(state.entity_id?.split(".")[0]) && !state.attributes?.entry_id)
-      .sort((a, b) => (a.attributes?.friendly_name || a.entity_id).localeCompare(b.attributes?.friendly_name || b.entity_id, "pt-BR"));
-    return `<option value="">Selecionar luz…</option>${entities.map((state) => {
-      const name = state.attributes?.friendly_name || state.entity_id;
-      return `<option value="${this._escape(state.entity_id)}" data-search="${this._escape(`${name} ${state.entity_id}`.toLocaleLowerCase("pt-BR"))}" ${state.entity_id === selected ? "selected" : ""}>${this._escape(name)} — ${this._escape(state.entity_id)}</option>`;
-    }).join("")}`;
+  _entityAutocomplete(kind, selected = "", index = 0) {
+    const choices = this._entityChoices(kind);
+    const selectedChoice = choices.find((choice) => choice.id === selected);
+    const value = selectedChoice?.label || (selected ? selected : "");
+    const field = kind === "target" ? "mapping_target" : "mapping_power";
+    const label = kind === "target" ? "Luz ou interruptor" : "Potência";
+    const placeholder = kind === "target" ? "Digite para buscar luz…" : "Digite para buscar potência…";
+    return `
+      <div class="entity-autocomplete" data-autocomplete data-kind="${kind}">
+        <input class="autocomplete-input" type="search" autocomplete="off" spellcheck="false"
+          data-autocomplete-input data-field="${field}" data-selected-id="${this._escape(selected)}"
+          value="${this._escape(value)}" placeholder="${placeholder}"
+          aria-label="${label} da entrada ${index + 1}" aria-expanded="false">
+        <div class="autocomplete-menu" data-autocomplete-menu hidden></div>
+      </div>
+    `;
   }
 
-  _powerOptions(selected = "") {
-    const entities = Object.values(this._hass?.states || {})
-      .filter((state) => {
-        if (state.entity_id?.split(".")[0] !== "sensor") return false;
-        const unit = state.attributes?.unit_of_measurement;
-        return state.entity_id === selected || state.attributes?.device_class === "power" || ["W", "kW"].includes(unit);
+  _entityChoices(kind) {
+    const states = Object.values(this._hass?.states || {});
+    const schedulerEntryIds = new Set(
+      states
+        .filter((state) => Array.isArray(state.attributes?.lights) && state.attributes?.entry_id)
+        .map((state) => state.attributes.entry_id)
+    );
+    const selected = kind === "target"
+      ? states.filter((state) => {
+          const domain = state.entity_id?.split(".")[0];
+          return ["light", "switch"].includes(domain)
+            && !schedulerEntryIds.has(state.attributes?.entry_id);
+        })
+      : states.filter((state) => {
+          if (state.entity_id?.split(".")[0] !== "sensor") return false;
+          const unit = state.attributes?.unit_of_measurement;
+          return state.attributes?.device_class === "power" || ["W", "kW"].includes(unit);
+        });
+    const choices = selected
+      .map((state) => {
+        const name = state.attributes?.friendly_name || state.entity_id;
+        return {
+          id: state.entity_id,
+          name,
+          label: `${name} — ${state.entity_id}`,
+          search: this._normalizeSearch(`${name} ${state.entity_id}`),
+        };
       })
-      .sort((a, b) => (a.attributes?.friendly_name || a.entity_id).localeCompare(b.attributes?.friendly_name || b.entity_id, "pt-BR"));
-    return `<option value="">Automático / nenhum</option>${entities.map((state) => {
-      const name = state.attributes?.friendly_name || state.entity_id;
-      return `<option value="${this._escape(state.entity_id)}" data-search="${this._escape(`${name} ${state.entity_id}`.toLocaleLowerCase("pt-BR"))}" ${state.entity_id === selected ? "selected" : ""}>${this._escape(name)} — ${this._escape(state.entity_id)}</option>`;
-    }).join("")}`;
+      .sort((a, b) => a.name.localeCompare(b.name, "pt-BR"));
+    if (kind === "power") {
+      choices.unshift({ id: "", name: "Automático / nenhum", label: "Automático / nenhum", search: "automatico nenhum" });
+    }
+    return choices;
   }
 
   _powerDialog() {
@@ -356,11 +394,14 @@ class LightScheduleCard extends HTMLElement {
     const action = target.dataset.action;
 
     try {
-      if (action === "toggle-light") {
+      if (action === "select-autocomplete-option") {
+        this._selectAutocompleteOption(target);
+      } else if (action === "toggle-light") {
         await this._hass.callService("homeassistant", "toggle", { entity_id: target.dataset.entityId });
       } else if (action === "power-history") {
         await this._openPowerHistory(target.dataset.powerEntityId, target.dataset.lightName);
       } else if (action === "close-power-dialog") {
+        this._powerLoadId += 1;
         this._powerDialogElement()?.close();
       } else if (action === "stop-now") {
         await this._hass.callService("light_scheduler", "stop", { entry_id: this._entryId() });
@@ -390,7 +431,11 @@ class LightScheduleCard extends HTMLElement {
         await this._deleteSchedule();
       }
     } catch (error) {
-      this._showDialogError(error?.message || String(error));
+      if (action === "save-zone") {
+        this._showZoneError(error?.message || String(error));
+      } else {
+        this._showDialogError(error?.message || String(error));
+      }
     }
   }
 
@@ -403,13 +448,14 @@ class LightScheduleCard extends HTMLElement {
     form.elements.start.value = schedule?.time || schedule?.start || "18:30";
     form.elements.end.value = schedule ? this._scheduleEnd(schedule) : "22:30";
     form.elements.interval.value = Math.max(0, Number(schedule?.interval || 0));
+    form.elements.enabled.checked = schedule?.enabled !== false;
     const days = Array.isArray(schedule?.days) ? schedule.days.map(Number) : [0, 1, 2, 3, 4, 5, 6];
     form.querySelectorAll('input[name="day"]').forEach((input) => { input.checked = days.includes(Number(input.value)); });
     dialog.querySelector("[data-dialog-title]").textContent = schedule ? "Editar agendamento" : "Novo agendamento";
     dialog.querySelector("[data-action='delete-schedule']").hidden = !schedule;
     this._showDialogError("");
     this._updateDurationPreview(form);
-    dialog.showModal();
+    if (!dialog.open) dialog.showModal();
   }
 
   async _saveSchedule() {
@@ -426,6 +472,7 @@ class LightScheduleCard extends HTMLElement {
       time: form.elements.start.value,
       duration: this._durationBetween(form.elements.start.value, form.elements.end.value),
       interval: Math.max(0, Math.min(300, Math.round(Number(form.elements.interval.value) || 0))),
+      enabled: form.elements.enabled.checked,
       days,
     };
     const scheduleId = form.elements.schedule_id.value;
@@ -469,7 +516,8 @@ class LightScheduleCard extends HTMLElement {
     dialog.querySelector("[data-power-title]").textContent = lightName || "Potência";
     dialog.querySelector("[data-power-sensor]").textContent = entityId;
     host.innerHTML = `<div class="chart-loading">Carregando histórico…</div>`;
-    dialog.showModal();
+    const loadId = ++this._powerLoadId;
+    if (!dialog.open) dialog.showModal();
 
     try {
       const helpers = await window.loadCardHelpers();
@@ -479,9 +527,9 @@ class LightScheduleCard extends HTMLElement {
         hours_to_show: 24,
       });
       historyCard.hass = this._hass;
-      if (dialog.open) host.replaceChildren(historyCard);
+      if (dialog.open && loadId === this._powerLoadId) host.replaceChildren(historyCard);
     } catch (error) {
-      if (dialog.open) {
+      if (dialog.open && loadId === this._powerLoadId) {
         host.innerHTML = `<div class="chart-error">Não foi possível carregar o gráfico.<small>${this._escape(error?.message || String(error))}</small></div>`;
       }
     }
@@ -495,15 +543,15 @@ class LightScheduleCard extends HTMLElement {
       error.hidden = true;
       error.textContent = "";
     }
-    dialog.showModal();
+    if (!dialog.open) dialog.showModal();
   }
 
   async _saveZone() {
     const dialog = this._zoneDialogElement();
     const mappings = [...dialog.querySelectorAll("[data-mapping-row]")].map((row) => ({
       name: row.querySelector('[name="mapping_name"]').value.trim(),
-      target_entity_id: row.querySelector('[name="mapping_target"]').value,
-      power_entity_id: row.querySelector('[name="mapping_power"]').value,
+      target_entity_id: row.querySelector('[data-field="mapping_target"]').dataset.selectedId || "",
+      power_entity_id: row.querySelector('[data-field="mapping_power"]').dataset.selectedId || "",
     }));
     const error = dialog.querySelector("[data-zone-error]");
     if (!mappings.length || mappings.some((item) => !item.target_entity_id)) {
@@ -517,6 +565,12 @@ class LightScheduleCard extends HTMLElement {
       error.hidden = false;
       return;
     }
+    const powers = mappings.map((item) => item.power_entity_id).filter(Boolean);
+    if (new Set(powers).size !== powers.length) {
+      error.textContent = "O mesmo sensor de potência não pode ser associado a duas entradas.";
+      error.hidden = false;
+      return;
+    }
     await this._hass.callService("light_scheduler", "set_zone_options", {
       entry_id: this._entryId(),
       entity_mappings: mappings,
@@ -526,18 +580,92 @@ class LightScheduleCard extends HTMLElement {
   }
 
   _handleInput(event) {
-    if (event.target.matches("[data-filter-select]")) {
-      const row = event.target.closest("[data-mapping-row]");
-      const select = row?.querySelector(`[name="${event.target.dataset.filterSelect}"]`);
-      const query = event.target.value.trim().toLocaleLowerCase("pt-BR");
-      select?.querySelectorAll("option").forEach((option) => {
-        option.hidden = Boolean(option.value && query && !option.dataset.search?.includes(query));
-      });
+    if (event.target.matches("[data-autocomplete-input]")) {
+      event.target.dataset.selectedId = "";
+      this._renderAutocompleteMenu(event.target.closest("[data-autocomplete]"));
       return;
     }
     if (event.target.matches('[name="start"], [name="end"]')) {
       this._updateDurationPreview(event.target.form);
     }
+  }
+
+  _handleFocusIn(event) {
+    if (event.target.matches("[data-autocomplete-input]")) {
+      event.target.select();
+      this._renderAutocompleteMenu(event.target.closest("[data-autocomplete]"));
+    }
+  }
+
+  _handleFocusOut(event) {
+    const autocomplete = event.target.closest?.("[data-autocomplete]");
+    if (!autocomplete || autocomplete.contains(event.relatedTarget)) return;
+    this._closeAutocomplete(autocomplete);
+  }
+
+  _handleKeyDown(event) {
+    if (!event.target.matches("[data-autocomplete-input]")) return;
+    const autocomplete = event.target.closest("[data-autocomplete]");
+    const firstOption = autocomplete?.querySelector("[data-action='select-autocomplete-option']");
+    if (event.key === "ArrowDown" && firstOption) {
+      event.preventDefault();
+      firstOption.focus();
+    } else if (event.key === "Enter" && firstOption) {
+      event.preventDefault();
+      this._selectAutocompleteOption(firstOption);
+    } else if (event.key === "Escape") {
+      event.preventDefault();
+      this._closeAutocomplete(autocomplete);
+      event.target.blur();
+    }
+  }
+
+  _renderAutocompleteMenu(autocomplete) {
+    const input = autocomplete?.querySelector("[data-autocomplete-input]");
+    const menu = autocomplete?.querySelector("[data-autocomplete-menu]");
+    if (!input || !menu) return;
+    const query = this._normalizeSearch(input.value);
+    const choices = this._entityChoices(autocomplete.dataset.kind)
+      .filter((choice) => !query || choice.search.includes(query))
+      .slice(0, 40);
+    menu.innerHTML = choices.length
+      ? choices.map((choice) => `
+          <button type="button" data-action="select-autocomplete-option"
+            data-entity-id="${this._escape(choice.id)}" data-entity-label="${this._escape(choice.label)}">
+            <strong>${this._escape(choice.name)}</strong>
+            ${choice.id ? `<small>${this._escape(choice.id)}</small>` : ""}
+          </button>
+        `).join("")
+      : `<div class="autocomplete-empty">Nenhuma entidade corresponde à busca.</div>`;
+    const rect = input.getBoundingClientRect();
+    const menuWidth = Math.min(Math.max(rect.width, 260), window.innerWidth - 16);
+    const left = Math.min(Math.max(8, rect.left), window.innerWidth - menuWidth - 8);
+    const roomBelow = window.innerHeight - rect.bottom - 12;
+    const openAbove = roomBelow < 190 && rect.top > roomBelow;
+    menu.style.width = `${menuWidth}px`;
+    menu.style.left = `${left}px`;
+    menu.style.top = openAbove ? "auto" : `${rect.bottom + 4}px`;
+    menu.style.bottom = openAbove ? `${window.innerHeight - rect.top + 4}px` : "auto";
+    menu.hidden = false;
+    input.setAttribute("aria-expanded", "true");
+  }
+
+  _selectAutocompleteOption(option) {
+    const autocomplete = option.closest("[data-autocomplete]");
+    const input = autocomplete?.querySelector("[data-autocomplete-input]");
+    if (!input) return;
+    input.value = option.dataset.entityLabel || "";
+    input.dataset.selectedId = option.dataset.entityId || "";
+    input.focus();
+    input.setSelectionRange(input.value.length, input.value.length);
+    this._closeAutocomplete(autocomplete);
+  }
+
+  _closeAutocomplete(autocomplete) {
+    const menu = autocomplete?.querySelector("[data-autocomplete-menu]");
+    const input = autocomplete?.querySelector("[data-autocomplete-input]");
+    if (menu) menu.hidden = true;
+    input?.setAttribute("aria-expanded", "false");
   }
 
   _addMappingRow() {
@@ -554,6 +682,7 @@ class LightScheduleCard extends HTMLElement {
     if (!list || !row) return;
     if (list.children.length === 1) {
       row.querySelectorAll("input, select").forEach((field) => { field.value = ""; });
+      row.querySelectorAll("[data-selected-id]").forEach((field) => { field.dataset.selectedId = ""; });
     } else {
       row.remove();
     }
@@ -575,32 +704,46 @@ class LightScheduleCard extends HTMLElement {
   }
 
   _durationBetween(start, end) {
-    const startMinutes = this._timeToMinutes(start);
-    const endMinutes = this._timeToMinutes(end);
-    if (startMinutes == null || endMinutes == null) return 1;
-    const minutes = (endMinutes - startMinutes + 1440) % 1440 || 1440;
-    return minutes * 60;
+    const startSeconds = this._timeToSeconds(start);
+    const endSeconds = this._timeToSeconds(end);
+    if (startSeconds == null || endSeconds == null) return 0;
+    return (endSeconds - startSeconds + 86400) % 86400 || 86400;
   }
 
   _scheduleEnd(schedule) {
-    const startMinutes = this._timeToMinutes(schedule.time || schedule.start);
-    if (startMinutes == null) return "--:--";
-    const durationMinutes = Math.max(1, Math.round(Number(schedule.duration || 0) / 60));
-    return this._minutesToTime(startMinutes + durationMinutes);
+    const startSeconds = this._timeToSeconds(schedule.time || schedule.start);
+    if (startSeconds == null) return "--:--";
+    const durationSeconds = Math.max(1, Math.round(Number(schedule.duration || 0)));
+    return this._secondsToTime(startSeconds + durationSeconds);
   }
 
-  _timeToMinutes(value) {
-    const match = /^(\d{1,2}):(\d{2})/.exec(String(value || ""));
+  _timeToSeconds(value) {
+    const match = /^(\d{1,2}):(\d{2})(?::(\d{2}))?$/.exec(String(value || ""));
     if (!match) return null;
     const hours = Number(match[1]);
     const minutes = Number(match[2]);
-    if (hours > 23 || minutes > 59) return null;
-    return hours * 60 + minutes;
+    const seconds = Number(match[3] || 0);
+    if (hours > 23 || minutes > 59 || seconds > 59) return null;
+    return hours * 3600 + minutes * 60 + seconds;
+  }
+
+  _timeToMinutes(value) {
+    const seconds = this._timeToSeconds(value);
+    return seconds == null ? null : Math.floor(seconds / 60);
   }
 
   _minutesToTime(value) {
     const minutes = ((Number(value) % 1440) + 1440) % 1440;
     return `${String(Math.floor(minutes / 60)).padStart(2, "0")}:${String(minutes % 60).padStart(2, "0")}`;
+  }
+
+  _secondsToTime(value) {
+    const seconds = ((Number(value) % 86400) + 86400) % 86400;
+    const hours = Math.floor(seconds / 3600);
+    const minutes = Math.floor((seconds % 3600) / 60);
+    const rest = seconds % 60;
+    const base = `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}`;
+    return rest ? `${base}:${String(rest).padStart(2, "0")}` : base;
   }
 
   _showDialogError(message) {
@@ -610,8 +753,19 @@ class LightScheduleCard extends HTMLElement {
     element.hidden = !message;
   }
 
+  _showZoneError(message) {
+    const element = this.shadowRoot.querySelector("[data-zone-error]");
+    if (!element) return;
+    element.textContent = message;
+    element.hidden = !message;
+  }
+
   _entryId() {
-    return this._state?.attributes?.entry_id || this._config.entry_id;
+    const entryId = this._state?.attributes?.entry_id || this._config.entry_id;
+    if (!entryId) {
+      throw new Error("O card precisa apontar para o sensor de uma zona do Light Scheduler.");
+    }
+    return entryId;
   }
 
   _navigate(path) {
@@ -656,16 +810,18 @@ class LightScheduleCard extends HTMLElement {
   _formatNext(attrs, sensorState) {
     const finish = attrs.finishes_at || attrs.active_end;
     if (attrs.active && finish) return `desligar às ${this._formatClock(finish)}`;
-    const next = attrs.next_run || (!["unknown", "unavailable", "none"].includes(String(sensorState).toLowerCase()) ? sensorState : null);
+    const fallback = new Date(sensorState);
+    const next = attrs.next_run || (Number.isNaN(fallback.getTime()) ? null : sensorState);
     if (!next) return "nenhuma ação programada";
     const date = new Date(next);
     if (Number.isNaN(date.getTime())) return String(next);
     const now = new Date();
     const tomorrow = new Date(now);
     tomorrow.setDate(now.getDate() + 1);
-    const sameDay = (a, b) => a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
-    const prefix = sameDay(date, now) ? "hoje" : sameDay(date, tomorrow) ? "amanhã" : date.toLocaleDateString("pt-BR", { weekday: "long" });
-    return `${prefix}, ${date.toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" })}`;
+    const timeZone = this._hass?.config?.time_zone;
+    const dateKey = (value) => value.toLocaleDateString("en-CA", { timeZone, year: "numeric", month: "2-digit", day: "2-digit" });
+    const prefix = dateKey(date) === dateKey(now) ? "hoje" : dateKey(date) === dateKey(tomorrow) ? "amanhã" : date.toLocaleDateString("pt-BR", { weekday: "long", timeZone });
+    return `${prefix}, ${date.toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit", timeZone })}`;
   }
 
   _formatDuration(seconds) {
@@ -701,7 +857,7 @@ class LightScheduleCard extends HTMLElement {
   _formatClock(value) {
     const date = new Date(value);
     if (Number.isNaN(date.getTime())) return "--:--";
-    return date.toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" });
+    return date.toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit", timeZone: this._hass?.config?.time_zone });
   }
 
   _number(value) {
@@ -716,6 +872,14 @@ class LightScheduleCard extends HTMLElement {
       .replaceAll(">", "&gt;")
       .replaceAll('"', "&quot;")
       .replaceAll("'", "&#039;");
+  }
+
+  _normalizeSearch(value) {
+    return String(value || "")
+      .normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "")
+      .toLocaleLowerCase("pt-BR")
+      .trim();
   }
 
   _styles() {
@@ -789,6 +953,7 @@ class LightScheduleCard extends HTMLElement {
         .schedules { display: grid; gap: 4px; }
         .schedule-row { width: 100%; min-width: 0; height: 35px; padding: 0 8px; display: grid; grid-template-columns: 19px 104px 8px 68px 8px minmax(0,1fr) 20px; align-items: center; gap: 3px; text-align: left; border: 1px solid rgba(127,127,127,.22); border-radius: 6px; background: rgba(127,127,127,.04); cursor: pointer; }
         .schedule-row:hover { background: rgba(127,127,127,.1); }
+        .schedule-row.is-disabled { opacity: .55; }
         .schedule-row .clock, .schedule-row .edit { --mdc-icon-size: 16px; color: var(--ls-blue); }
         .schedule-row strong { font-size: 11px; }
         .time-range { display: inline-flex; align-items: center; justify-content: space-between; gap: 4px; white-space: nowrap; }
@@ -800,7 +965,7 @@ class LightScheduleCard extends HTMLElement {
         .add-button { width: 100%; height: 31px; margin-top: 5px; display: flex; align-items: center; justify-content: center; gap: 6px; border: 1px solid rgba(127,127,127,.22); border-radius: 6px; background: transparent; color: var(--ls-blue); font-size: 10px; cursor: pointer; }
         .add-button:hover { background: rgba(33,150,243,.08); }
         .add-button ha-icon { --mdc-icon-size: 17px; }
-        dialog { width: min(390px, calc(100vw - 32px)); padding: 0; border: 1px solid rgba(127,127,127,.35); border-radius: 13px; color: var(--primary-text-color); background: var(--card-background-color, #1c1c1c); box-shadow: 0 18px 60px rgba(0,0,0,.5); }
+        dialog { width: min(390px, calc(100vw - 32px)); padding: 0; overflow: visible; border: 1px solid rgba(127,127,127,.35); border-radius: 13px; color: var(--primary-text-color); background: var(--card-background-color, #1c1c1c); box-shadow: 0 18px 60px rgba(0,0,0,.5); }
         dialog::backdrop { background: rgba(0,0,0,.62); backdrop-filter: blur(2px); }
         .zone-dialog { width: min(580px, calc(100vw - 24px)); }
         .power-dialog { width: min(470px, calc(100vw - 32px)); }
@@ -829,6 +994,11 @@ class LightScheduleCard extends HTMLElement {
         .interval-input:focus-within { border-color: var(--ls-blue); }
         .interval-input input { width: 100%; min-width: 0; height: 100%; padding: 0 5px 0 8px; border: 0; outline: 0; color: var(--primary-text-color); background: transparent; }
         .interval-input b { color: var(--secondary-text-color); font-size: 9px; font-weight: 400; }
+        .schedule-enabled { min-height: 42px; margin-top: 10px; padding: 7px 10px; display: flex; align-items: center; gap: 9px; border: 1px solid rgba(127,127,127,.24); border-radius: 6px; cursor: pointer; }
+        .schedule-enabled input { width: 17px; height: 17px; accent-color: var(--ls-blue); }
+        .schedule-enabled strong, .schedule-enabled small { display: block; }
+        .schedule-enabled strong { font-size: 11px; }
+        .schedule-enabled small { margin-top: 2px; color: var(--secondary-text-color); font-size: 9px; }
         fieldset { margin: 16px 0 0; padding: 0; border: 0; }
         .day-grid { margin-top: 7px; display: grid; grid-template-columns: repeat(7,1fr); gap: 4px; }
         .day-grid input { position: absolute; opacity: 0; pointer-events: none; }
@@ -843,13 +1013,20 @@ class LightScheduleCard extends HTMLElement {
         .mapping-header, .mapping-row { display: grid; grid-template-columns: 24px minmax(90px,.7fr) minmax(140px,1.2fr) minmax(130px,1fr) 28px; align-items: center; gap: 6px; }
         .mapping-header { padding: 0 8px 5px; color: var(--secondary-text-color); font-size: 9px; }
         .mapping-list { max-height: min(390px, 48vh); overflow-y: auto; display: grid; gap: 5px; }
-        .mapping-row { min-height: 76px; padding: 6px 7px; border: 1px solid rgba(127,127,127,.23); border-radius: 7px; background: rgba(127,127,127,.035); }
+        .mapping-row { min-height: 48px; padding: 6px 7px; border: 1px solid rgba(127,127,127,.23); border-radius: 7px; background: rgba(127,127,127,.035); }
         .mapping-order { width: 22px; height: 22px; display: grid; place-items: center; border-radius: 50%; color: var(--secondary-text-color); background: rgba(127,127,127,.14); font-size: 9px; }
-        .mapping-row input, .mapping-row select { width: 100%; min-width: 0; height: 34px; padding: 0 8px; overflow: hidden; text-overflow: ellipsis; border: 1px solid rgba(127,127,127,.32); border-radius: 5px; outline: 0; color: var(--primary-text-color); background: var(--card-background-color, #1c1c1c); font-size: 10px; }
-        .mapping-row input:focus, .mapping-row select:focus { border-color: var(--ls-blue); }
-        .selector-stack { min-width: 0; display: grid; gap: 4px; }
-        .mapping-row .selector-search { height: 26px; padding-inline: 7px; color: var(--secondary-text-color); font-size: 9px; background: rgba(127,127,127,.055); }
-        .mapping-row .selector-search:focus { color: var(--primary-text-color); }
+        .mapping-row input { width: 100%; min-width: 0; height: 34px; padding: 0 8px; overflow: hidden; text-overflow: ellipsis; border: 1px solid rgba(127,127,127,.32); border-radius: 5px; outline: 0; color: var(--primary-text-color); background: var(--card-background-color, #1c1c1c); font-size: 10px; }
+        .mapping-row input:focus { border-color: var(--ls-blue); }
+        .entity-autocomplete { min-width: 0; }
+        .autocomplete-input { padding-right: 25px !important; background-image: linear-gradient(45deg,transparent 50%,var(--secondary-text-color) 50%),linear-gradient(135deg,var(--secondary-text-color) 50%,transparent 50%); background-position: calc(100% - 12px) 14px,calc(100% - 8px) 14px; background-size: 4px 4px,4px 4px; background-repeat: no-repeat; }
+        .autocomplete-menu { position: fixed; z-index: 10000; max-height: min(260px, 42vh); padding: 4px; overflow-y: auto; border: 1px solid rgba(127,127,127,.42); border-radius: 7px; background: var(--card-background-color, #1c1c1c); box-shadow: 0 10px 30px rgba(0,0,0,.5); }
+        .autocomplete-menu[hidden] { display: none; }
+        .autocomplete-menu button { width: 100%; min-height: 42px; padding: 6px 8px; display: block; overflow: hidden; text-align: left; border: 0; border-radius: 5px; background: transparent; cursor: pointer; }
+        .autocomplete-menu button:hover, .autocomplete-menu button:focus { outline: 0; background: rgba(33,150,243,.14); }
+        .autocomplete-menu strong, .autocomplete-menu small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .autocomplete-menu strong { font-size: 10px; }
+        .autocomplete-menu small { margin-top: 2px; color: var(--secondary-text-color); font-size: 9px; }
+        .autocomplete-empty { padding: 12px 8px; color: var(--secondary-text-color); text-align: center; font-size: 10px; }
         .remove-mapping-button { width: 28px; height: 28px; padding: 0; display: grid; place-items: center; border: 0; border-radius: 50%; color: var(--secondary-text-color); background: transparent; cursor: pointer; }
         .remove-mapping-button:hover { color: var(--error-color); background: rgba(255,80,80,.08); }
         .remove-mapping-button ha-icon { --mdc-icon-size: 17px; }
@@ -873,8 +1050,8 @@ class LightScheduleCard extends HTMLElement {
           .mapping-row { grid-template-columns: 24px minmax(0,1fr) minmax(0,1fr) 28px; }
           .mapping-order { grid-row: 1 / 3; }
           .mapping-name { grid-column: 2 / 4; }
-          .mapping-row .selector-stack:first-of-type { grid-column: 2; }
-          .mapping-row .selector-stack:last-of-type { grid-column: 3; }
+          .mapping-row .entity-autocomplete:first-of-type { grid-column: 2; }
+          .mapping-row .entity-autocomplete:last-of-type { grid-column: 3; }
           .remove-mapping-button { grid-column: 4; grid-row: 1 / 3; }
         }
       </style>

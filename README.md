@@ -10,7 +10,7 @@ Integração customizada para Home Assistant que controla todas as luzes de uma 
 4. Procure **Light Scheduler**, informe o nome da sala e selecione todas as luzes ou tomadas dela.
 5. Os sensores de potência são opcionais. Quando possível, a integração os encontra automaticamente no mesmo dispositivo; também é possível escolhê-los manualmente.
 
-As entidades podem ser alteradas depois diretamente pelo ícone de engrenagem do card. Cada entrada possui nome personalizado, seletor da luz ou tomada e seletor do respectivo sensor de potência. Os dois seletores têm pesquisa por nome ou `entity_id`. A ordem das linhas é a mesma usada no card, e o botão **Adicionar entrada** inclui novas luzes sem recriar a zona.
+As entidades podem ser alteradas depois diretamente pelo ícone de engrenagem do card. Cada entrada possui nome personalizado e um campo de autocomplete para a luz ou tomada e outro para o respectivo sensor de potência. Basta digitar parte do nome ou do `entity_id` para restarem apenas os resultados correspondentes. A ordem das linhas é a mesma usada no card, e o botão **Adicionar entrada** inclui novas luzes sem recriar a zona.
 
 ## Card Lovelace
 
@@ -29,9 +29,11 @@ O card permite:
 - abrir o gráfico das últimas 24 horas clicando na potência individual;
 - acompanhar potência individual e total;
 - ver a próxima ação e o tempo restante da execução;
-- adicionar, editar e excluir agendamentos pelos horários de acender e apagar, com duração calculada automaticamente, inclusive ao atravessar a meia-noite;
+- adicionar, pausar, editar e excluir agendamentos pelos horários de acender e apagar, com duração calculada automaticamente, inclusive ao atravessar a meia-noite;
 - definir um intervalo de 0 a 300 segundos para acender e apagar as entradas uma por vez, sempre na mesma ordem; o horário de apagar inicia a sequência de desligamento;
 - abrir a configuração da zona pelo ícone de engrenagem.
+
+Execuções em andamento são persistidas. Se o Home Assistant reiniciar, a integração restaura o horário de desligamento; ao remover ou descarregar uma zona ativa, as luzes da execução são desligadas na ordem configurada.
 
 ## Serviços
 

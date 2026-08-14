@@ -18,6 +18,25 @@
       "no_lights": "Select at least one light or smart plug."
     }
   },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Edit light zone",
+        "data": {
+          "name": "Room name",
+          "target_entity_ids": "Lights or smart plugs",
+          "power_entity_ids": "Power sensors (optional)",
+          "default_duration": "Default duration (min)"
+        },
+        "data_description": {
+          "power_entity_ids": "Existing light-to-power pairs are preserved when possible. Use the card for explicit per-light pairing."
+        }
+      }
+    },
+    "error": {
+      "no_lights": "Select at least one light or smart plug."
+    }
+  },
   "entity": {
     "switch": {
       "schedule_enabled": {

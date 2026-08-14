@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Light Scheduler card harness</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --primary-color: #2196f3;
+        --primary-text-color: #f2f2f2;
+        --secondary-text-color: #a8a8a8;
+        --card-background-color: #111;
+        --ha-card-background: #111;
+        --error-color: #ff5252;
+      }
+      body { width: 500px; margin: 16px auto; background: #080808; font-family: Arial, sans-serif; }
+    </style>
+    <script>window.customCards = [];</script>
+    <script src="../custom_components/light_scheduler/frontend/light-schedule-card.js"></script>
+  </head>
+  <body>
+    <light-schedule-card id="card"></light-schedule-card>
+    <script>
+      const mappings = [
+        { name: "Gavita 3", target_entity_id: "switch.gavita_3", power_entity_id: "sensor.gavita_3_power" },
+        { name: "Gavita 4", target_entity_id: "switch.gavita_4", power_entity_id: "sensor.gavita_4_power" },
+      ];
+      const states = {
+        "sensor.indoor_next_run": {
+          entity_id: "sensor.indoor_next_run",
+          state: "2026-08-14T18:30:00-03:00",
+          attributes: {
+            entry_id: "indoor-entry",
+            zone_name: "Indoor",
+            enabled: true,
+            active: false,
+            lights_on: 1,
+            total_lights: 2,
+            total_power_w: 624.5,
+            entity_mappings: mappings,
+            lights: [
+              { entity_id: "switch.gavita_3", name: "Gavita 3", state: "on", available: true, power_entity_id: "sensor.gavita_3_power", power_w: 624.5 },
+              { entity_id: "switch.gavita_4", name: "Gavita 4", state: "off", available: true, power_entity_id: "sensor.gavita_4_power", power_w: 0 },
+            ],
+            schedules: [{ id: "one", time: "18:30", duration: 14400, interval: 5, days: [0, 1, 2, 3, 4, 5, 6], enabled: true }],
+          },
+        },
+      };
+      for (let index = 1; index <= 18; index += 1) {
+        states[`switch.gavita_${index}`] = { entity_id: `switch.gavita_${index}`, state: "off", attributes: { friendly_name: `Gavita ${index}` } };
+        states[`sensor.gavita_${index}_power`] = { entity_id: `sensor.gavita_${index}_power`, state: "0", attributes: { friendly_name: `Gavita ${index} Power`, device_class: "power", unit_of_measurement: "W" } };
+      }
+      const card = document.querySelector("#card");
+      card.setConfig({ entity: "sensor.indoor_next_run" });
+      card.hass = {
+        states,
+        config: { time_zone: "America/Sao_Paulo" },
+        callService: async () => {},
+      };
+    </script>
+  </body>
+</html>
