@@ -26,7 +26,7 @@
         { name: "Gavita 3", target_entity_id: "switch.gavita_3", power_entity_id: "sensor.gavita_3_power" },
         { name: "Gavita 4", target_entity_id: "switch.gavita_4", power_entity_id: "sensor.gavita_4_power" },
       ];
-      const states = {
+      let states = {
         "sensor.indoor_next_run": {
           entity_id: "sensor.indoor_next_run",
           state: "2026-08-14T18:30:00-03:00",
@@ -64,13 +64,16 @@
       const card = document.querySelector("#card");
       const sensorId = "sensor.indoor_next_run";
 
-      // Minimal fake backend: mutates state so toggles can be exercised here.
+      // Minimal fake backend. Like real Home Assistant it publishes a brand new
+      // states object every time: mutating the old one in place would leave the
+      // card comparing a state against itself and silently skipping the render.
       function applyService(domain, service, data) {
         const sensor = states[sensorId];
         const attributes = { ...sensor.attributes };
+        const next = { ...states };
         if (domain === "homeassistant" && data.entity_id === "switch.indoor_schedule_enabled") {
           const on = service === "turn_on";
-          states[data.entity_id] = { ...states[data.entity_id], state: on ? "on" : "off" };
+          next[data.entity_id] = { ...states[data.entity_id], state: on ? "on" : "off" };
           attributes.enabled = on;
         } else if (domain === "light_scheduler" && service === "update_schedule") {
           attributes.schedules = attributes.schedules.map((item) =>
@@ -78,13 +81,15 @@
           );
         } else if (domain === "light_scheduler" && service === "remove_schedule") {
           attributes.schedules = attributes.schedules.filter((item) => item.id !== data.id);
+        } else if (domain === "light_scheduler" && service === "add_schedule") {
+          attributes.schedules = [...attributes.schedules, { ...data, id: `s${Date.now()}` }];
         } else {
           console.log("callService", domain, service, data);
           return;
         }
         console.log("callService", domain, service, data);
-        // A new object identity is required for the card to re-render.
-        states[sensorId] = { ...sensor, attributes };
+        next[sensorId] = { ...sensor, attributes };
+        states = next;
         push();
       }
 
