@@ -8,7 +8,10 @@ import voluptuous as vol
 
 from homeassistant import config_entries
 from homeassistant.config_entries import ConfigEntry, ConfigFlowResult
+from homeassistant.core import HomeAssistant
 from homeassistant.helpers import selector
+
+from .power import is_power_sensor
 
 from .const import (
     CONF_DEFAULT_DURATION,
@@ -32,6 +35,21 @@ def _entity_list(value: Any) -> list[str]:
     if isinstance(value, str):
         return [value]
     return list(dict.fromkeys(value))
+
+
+def _invalid_power_sensors(hass: HomeAssistant, powers: list[str]) -> list[str]:
+    """Return selected sensors that are loaded but are not power meters.
+
+    Sensors that are not loaded yet are accepted: rejecting them would break
+    setup after a restart, and the runtime confirmation already ignores any
+    reading it cannot verify as power.
+    """
+    return [
+        entity_id
+        for entity_id in powers
+        if hass.states.get(entity_id) is not None
+        and not is_power_sensor(hass.states.get(entity_id))
+    ]
 
 
 def _build_mappings(
@@ -137,13 +155,15 @@ class LightSchedulerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         errors: dict[str, str] = {}
         if user_input is not None:
             targets = _entity_list(user_input.get(CONF_TARGET_ENTITY_IDS))
+            power_ids = _entity_list(user_input.get(CONF_POWER_ENTITY_IDS))
             if not targets:
                 errors[CONF_TARGET_ENTITY_IDS] = "no_lights"
+            elif _invalid_power_sensors(self.hass, power_ids):
+                errors[CONF_POWER_ENTITY_IDS] = "not_power_sensor"
             else:
                 await self.async_set_unique_id("|".join(sorted(targets)))
                 self._abort_if_unique_id_configured()
                 name = str(user_input[CONF_NAME]).strip()
-                power_ids = _entity_list(user_input.get(CONF_POWER_ENTITY_IDS))
                 return self.async_create_entry(
                     title=name,
                     data={CONF_NAME: name},
@@ -182,14 +202,17 @@ class LightSchedulerOptionsFlow(config_entries.OptionsFlow):
         """Edit an existing light zone."""
         if user_input is not None:
             targets = _entity_list(user_input.get(CONF_TARGET_ENTITY_IDS))
+            power_ids = _entity_list(user_input.get(CONF_POWER_ENTITY_IDS))
+            errors: dict[str, str] = {}
             if not targets:
+                errors[CONF_TARGET_ENTITY_IDS] = "no_lights"
+            elif _invalid_power_sensors(self.hass, power_ids):
+                errors[CONF_POWER_ENTITY_IDS] = "not_power_sensor"
+            if errors:
                 return self.async_show_form(
-                    step_id="init",
-                    data_schema=_schema(user_input),
-                    errors={CONF_TARGET_ENTITY_IDS: "no_lights"},
+                    step_id="init", data_schema=_schema(user_input), errors=errors
                 )
             name = str(user_input[CONF_NAME]).strip()
-            power_ids = _entity_list(user_input.get(CONF_POWER_ENTITY_IDS))
             options = {
                 **self.config_entry.options,
                 CONF_TARGET_ENTITY_IDS: targets,
@@ -209,7 +232,7 @@ class LightSchedulerOptionsFlow(config_entries.OptionsFlow):
             self.hass.config_entries.async_update_entry(
                 self.config_entry,
                 title=name,
-                data={CONF_NAME: name},
+                data={**self.config_entry.data, CONF_NAME: name},
             )
             return self.async_create_entry(title="", data=options)
 

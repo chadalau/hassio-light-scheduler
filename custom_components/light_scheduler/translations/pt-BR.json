@@ -15,7 +15,8 @@
       }
     },
     "error": {
-      "no_lights": "Selecione pelo menos uma luz ou tomada."
+      "no_lights": "Selecione pelo menos uma luz ou tomada.",
+      "not_power_sensor": "Selecione um sensor que meça potência (W ou kW)."
     }
   },
   "options": {
@@ -34,7 +35,8 @@
       }
     },
     "error": {
-      "no_lights": "Selecione pelo menos uma luz ou tomada."
+      "no_lights": "Selecione pelo menos uma luz ou tomada.",
+      "not_power_sensor": "Selecione um sensor que meça potência (W ou kW)."
     }
   },
   "entity": {

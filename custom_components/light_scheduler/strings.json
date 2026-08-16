@@ -15,7 +15,8 @@
       }
     },
     "error": {
-      "no_lights": "Select at least one light or smart plug."
+      "no_lights": "Select at least one light or smart plug.",
+      "not_power_sensor": "Select a sensor that measures power (W or kW)."
     }
   },
   "options": {
@@ -34,7 +35,8 @@
       }
     },
     "error": {
-      "no_lights": "Select at least one light or smart plug."
+      "no_lights": "Select at least one light or smart plug.",
+      "not_power_sensor": "Select a sensor that measures power (W or kW)."
     }
   },
   "entity": {

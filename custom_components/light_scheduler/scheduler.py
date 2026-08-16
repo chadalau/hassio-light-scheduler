@@ -7,16 +7,19 @@ import logging
 from typing import Any
 
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import EVENT_HOMEASSISTANT_STARTED, STATE_ON, STATE_UNAVAILABLE, STATE_UNKNOWN
+from homeassistant.const import (EVENT_HOMEASSISTANT_STARTED, STATE_OFF, STATE_ON, STATE_UNAVAILABLE,
+                                 STATE_UNKNOWN)
 from homeassistant.core import CoreState, Event, HomeAssistant, callback
 from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.helpers.event import async_track_point_in_time, async_track_state_change_event
 from homeassistant.util import dt as dt_util
 
-from .const import (CONF_DEFAULT_DURATION, CONF_ENABLED, CONF_ENTITY_MAPPINGS, CONF_MAX_DURATION, CONF_POWER_ENTITY_IDS,
-                    CONF_SCHEDULE_DAYS, CONF_SCHEDULE_DURATION, CONF_SCHEDULE_INTERVAL, CONF_SCHEDULE_TIME, CONF_SCHEDULES,
-                    CONF_TARGET_ENTITY_IDS, HISTORY_MAX_ENTRIES, HISTORY_RETENTION_DAYS, SIGNAL_UPDATE,
-                    MAX_SCHEDULE_INTERVAL, SOURCE_EXTERNAL, SOURCE_MANUAL, SOURCE_SCHEDULE)
+from .const import (ACTUATION_GRACE, CONF_DEFAULT_DURATION, CONF_ENABLED, CONF_ENTITY_MAPPINGS, CONF_MAX_DURATION,
+                    CONF_POWER_ENTITY_IDS, CONF_SCHEDULE_DAYS, CONF_SCHEDULE_DURATION, CONF_SCHEDULE_ID,
+                    CONF_SCHEDULE_INTERVAL, CONF_SCHEDULE_TIME, CONF_SCHEDULES, CONF_TARGET_ENTITY_IDS,
+                    HISTORY_MAX_ENTRIES, HISTORY_RETENTION_DAYS, MAX_SCHEDULE_INTERVAL, POWER_CONFIRM_THRESHOLD_W,
+                    SIGNAL_UPDATE, SOURCE_EXTERNAL, SOURCE_MANUAL, SOURCE_SCHEDULE)
+from .power import read_power_watts
 from .store import RuntimeStore
 from .next_run import find_next_run
 
@@ -32,6 +35,8 @@ class LightScheduler:
         self._stopping = False
         self._run_interval = 0
         self._run_targets: list[str] = []
+        self._run_warnings: list[str] = []
+        self._run_schedule_id: str | None = None
         self._source: str | None = None
         self._started_at: datetime | None = None
         self._finishes_at: datetime | None = None
@@ -45,6 +50,7 @@ class LightScheduler:
         self._schedule_generation = 0
         self._background_tasks: set[asyncio.Task] = set()
         self._ramp_task: asyncio.Task | None = None
+        self._stop_task: asyncio.Task | None = None
         self._unloading = False
 
     @property
@@ -119,6 +125,11 @@ class LightScheduler:
     def history(self) -> list[dict[str, Any]]:
         return self._history
 
+    @property
+    def warnings(self) -> list[str]:
+        """Entities that did not confirm their requested state this run."""
+        return list(self._run_warnings)
+
     async def async_setup(self) -> None:
         """Restore runtime data and subscribe to scheduler and light activity."""
         stored = await self.store.async_get(self.entry.entry_id)
@@ -175,6 +186,7 @@ class LightScheduler:
         self._run_interval = max(
             0, min(int(value.get("interval") or 0), MAX_SCHEDULE_INTERVAL)
         )
+        self._run_schedule_id = str(value["schedule_id"]) if value.get("schedule_id") else None
         stored_targets = value.get("targets")
         self._run_targets = (
             [str(entity_id) for entity_id in stored_targets]
@@ -203,7 +215,10 @@ class LightScheduler:
             self._create_background_task(
                 self._record_external(event.data["entity_id"], True)
             )
-        elif new_state:
+        elif new_state and new_state.state == STATE_OFF:
+            # Only a real off closes the record. Going unavailable/unknown is
+            # a loss of contact, not a confirmed shutdown, and closing on it
+            # would invent a duration and split the next run in two.
             self._create_background_task(
                 self._record_external(event.data["entity_id"], False)
             )
@@ -297,17 +312,109 @@ class LightScheduler:
                 duration=int(schedule[CONF_SCHEDULE_DURATION]),
                 source=SOURCE_SCHEDULE,
                 interval=int(schedule.get(CONF_SCHEDULE_INTERVAL, 0)),
+                schedule_id=schedule.get(CONF_SCHEDULE_ID),
+                entity_ids=schedule.get(CONF_TARGET_ENTITY_IDS),
             )
         else:
             self._schedule_next()
+
+    def _power_entity_for(self, entity_id: str) -> str | None:
+        """Return the power sensor explicitly paired with a target, if any."""
+        return next(
+            (
+                item.get("power_entity_id")
+                for item in self.entity_mappings
+                if item.get("target_entity_id") == entity_id and item.get("power_entity_id")
+            ),
+            None,
+        )
+
+    def _is_confirmed(self, entity_id: str, expect_on: bool, power_entity_id: str | None) -> bool:
+        """Check the entity's own state and, when paired, its power reading.
+
+        A power sensor is the only way to catch a light that reports "on" in
+        Home Assistant but never actually drew current (dead bulb, tripped
+        breaker, lost mesh command). It is skipped whenever no sensor is
+        paired, or its reading is temporarily unavailable.
+        """
+        state = self.hass.states.get(entity_id)
+        if state is None or state.state != (STATE_ON if expect_on else STATE_OFF):
+            return False
+        if not power_entity_id:
+            return True
+        watts = read_power_watts(self.hass, power_entity_id)
+        if watts is None:
+            return True
+        return (watts > POWER_CONFIRM_THRESHOLD_W) == expect_on
+
+    async def _dispatch(self, entity_id: str, service: str) -> None:
+        """Send one turn_on/turn_off call without waiting for confirmation."""
+        try:
+            await self.hass.services.async_call(
+                "homeassistant", service, {"entity_id": entity_id}, blocking=True
+            )
+        except Exception:  # Home Assistant reports the failing entity.
+            _LOGGER.exception(
+                "Unable to call %s for %s in %s", service, entity_id, self.entry.title
+            )
+
+    async def _await_group(self, entity_ids: list[str], expect_on: bool) -> list[str]:
+        """Wait one shared grace period for a group; return who never answered."""
+        deadline = dt_util.utcnow() + timedelta(seconds=ACTUATION_GRACE)
+        pending = list(entity_ids)
+        while pending:
+            pending = [
+                entity_id
+                for entity_id in pending
+                if not self._is_confirmed(
+                    entity_id, expect_on, self._power_entity_for(entity_id)
+                )
+            ]
+            remaining = (deadline - dt_util.utcnow()).total_seconds()
+            if not pending or remaining <= 0:
+                break
+            await asyncio.sleep(min(1, remaining))
+        return pending
+
+    async def _confirm_group(
+        self, entity_ids: list[str], service: str, expect_on: bool
+    ) -> list[str]:
+        """Confirm a whole group, resending once to whoever did not answer.
+
+        The grace period belongs to the group, never to each entity: one
+        silent light must not add its own timeout to every other light's
+        wait, or the configured off time stops being a real bound.
+        """
+        pending = await self._await_group(entity_ids, expect_on)
+        if not pending:
+            return []
+        _LOGGER.warning(
+            "%s not confirmed for %s in %s within %ss, retrying",
+            service, ", ".join(pending), self.entry.title, ACTUATION_GRACE,
+        )
+        for entity_id in pending:
+            await self._dispatch(entity_id, service)
+        pending = await self._await_group(pending, expect_on)
+        if pending:
+            _LOGGER.warning(
+                "%s could not be confirmed for %s in %s after retry",
+                service, ", ".join(pending), self.entry.title,
+            )
+        return pending
 
     async def async_turn_on(
         self,
         duration: int | None = None,
         source: str = SOURCE_MANUAL,
         interval: int = 0,
+        schedule_id: str | None = None,
+        entity_ids: list[str] | None = None,
     ) -> None:
-        """Turn configured lights on sequentially for a bounded duration."""
+        """Turn configured lights on sequentially for a bounded duration.
+
+        `entity_ids` narrows the run to part of the zone; empty or None keeps
+        the whole zone, so a light added later joins existing schedules.
+        """
         if self._active:
             # Repeated clicks and overlapping schedules must never invert the
             # current run. The dedicated stop action is the only way to end it.
@@ -316,8 +423,11 @@ class LightScheduler:
         seconds = duration if duration is not None else int(self.options.get(CONF_DEFAULT_DURATION, 14400))
         seconds = max(1, min(int(seconds), max_duration))
         interval = max(0, min(int(interval), MAX_SCHEDULE_INTERVAL))
+        selected = set(entity_ids or ())
         targets: list[str] = []
         for entity_id in self.target_entity_ids:
+            if selected and entity_id not in selected:
+                continue
             state = self.hass.states.get(entity_id)
             if state and state.state not in (STATE_UNAVAILABLE, STATE_UNKNOWN):
                 targets.append(entity_id)
@@ -328,6 +438,8 @@ class LightScheduler:
         self._stopping = False
         self._run_interval = interval
         self._run_targets = list(targets)
+        self._run_warnings = []
+        self._run_schedule_id = schedule_id
         self._started_at = dt_util.utcnow()
         self._finishes_at = self._started_at + timedelta(seconds=seconds)
         self._arm_finish_timer()
@@ -338,26 +450,26 @@ class LightScheduler:
         # The same interval is then used to turn the lights off in order.
         current_task = asyncio.current_task()
         self._ramp_task = current_task
+        dispatched: list[str] = []
         try:
             for index, entity_id in enumerate(targets):
                 if not self._active or self._stopping or self._unloading:
                     break
-                try:
-                    await self.hass.services.async_call(
-                        "homeassistant",
-                        "turn_on",
-                        {"entity_id": entity_id},
-                        blocking=True,
-                    )
-                except Exception:  # Home Assistant reports the failed entity.
-                    _LOGGER.exception(
-                        "Unable to turn on %s in %s", entity_id, self.entry.title
-                    )
+                await self._dispatch(entity_id, "turn_on")
+                dispatched.append(entity_id)
                 if interval and index < len(targets) - 1 and self._active and not self._stopping:
                     remaining = (self._finishes_at - dt_util.utcnow()).total_seconds()
                     if remaining <= 0:
                         break
                     await asyncio.sleep(min(interval, remaining))
+            # Confirm only once the whole ramp is out, so a silent light
+            # delays the report instead of the remaining lights.
+            if dispatched and self._active and not self._stopping and not self._unloading:
+                self._run_warnings = await self._confirm_group(
+                    dispatched, "turn_on", True
+                )
+                if self._run_warnings:
+                    self._notify()
         finally:
             if self._ramp_task is current_task:
                 self._ramp_task = None
@@ -368,10 +480,35 @@ class LightScheduler:
     async def async_stop(
         self, interval: int | None = None, *, schedule_next: bool = True
     ) -> None:
-        """Stop an execution using the same ordered interval as startup."""
-        if not self._active or self._stopping:
+        """Stop an execution, joining a shutdown that is already running."""
+        if not self._active:
+            return
+        if self._stopping:
+            # Another caller already owns the shutdown. Every later caller
+            # waits for it, otherwise unload returns while turn_off calls
+            # are still in flight.
+            stop_task = self._stop_task
+            if (
+                stop_task
+                and stop_task is not asyncio.current_task()
+                and not stop_task.done()
+            ):
+                await asyncio.gather(stop_task, return_exceptions=True)
             return
         self._stopping = True
+        self._stop_task = asyncio.current_task()
+        try:
+            await self._async_stop_sequence(interval, schedule_next=schedule_next)
+        finally:
+            self._stop_task = None
+            # A sequence that raised must not leave the zone stuck in
+            # "stopping", or no later call could ever turn the lights off.
+            self._stopping = False
+
+    async def _async_stop_sequence(
+        self, interval: int | None, *, schedule_next: bool
+    ) -> None:
+        """Turn every target off in order, then close and persist the run."""
         ramp_task = self._ramp_task
         current_task = asyncio.current_task()
         if ramp_task and ramp_task is not current_task and not ramp_task.done():
@@ -384,25 +521,23 @@ class LightScheduler:
         self._notify()
         targets = list(self._run_targets or self.target_entity_ids)
         for index, entity_id in enumerate(targets):
-            try:
-                await self.hass.services.async_call(
-                    "homeassistant",
-                    "turn_off",
-                    {"entity_id": entity_id},
-                    blocking=True,
-                )
-            except Exception:
-                _LOGGER.exception(
-                    "Unable to turn off %s in %s", entity_id, self.entry.title
-                )
+            await self._dispatch(entity_id, "turn_off")
             if interval and index < len(targets) - 1:
                 await asyncio.sleep(interval)
+        self._run_warnings = list(
+            dict.fromkeys(
+                [*self._run_warnings, *await self._confirm_group(targets, "turn_off", False)]
+            )
+        )
         started, source = self._started_at, self._source
         finished = dt_util.utcnow()
         self._history.append({"started_at": started.isoformat() if started else None, "finished_at": finished.isoformat(),
-                              "duration": int((finished - started).total_seconds()) if started else None, "source": source})
+                              "duration": int((finished - started).total_seconds()) if started else None, "source": source,
+                              "warnings": list(dict.fromkeys(self._run_warnings))})
         self._active = False; self._stopping = False; self._run_interval = 0
         self._run_targets = []
+        self._run_warnings = []
+        self._run_schedule_id = None
         self._source = None; self._started_at = None; self._finishes_at = None
         self._prune_history()
         await self._save_runtime(immediate=True)
@@ -437,6 +572,7 @@ class LightScheduler:
                 "source": self._source,
                 "interval": self._run_interval,
                 "targets": self._run_targets,
+                "schedule_id": self._run_schedule_id,
             }
         await self.store.async_set(
             self.entry.entry_id,
@@ -455,7 +591,43 @@ class LightScheduler:
         if self._unsub_states:
             self._unsub_states()
         self._unsub_states = async_track_state_change_event(self.hass, self.target_entity_ids, self._on_light_changed)
+        await self._reconcile_active_run_edit()
         self._schedule_next()
+
+    async def _reconcile_active_run_edit(self) -> None:
+        """Apply an edited off time to the schedule that is running right now.
+
+        A schedule only sets the finish time once, at the moment it starts a
+        run. Editing that same schedule afterwards used to have no effect on
+        the run already in progress -- the light kept the old off time. Here
+        we re-read the schedule that started the current run and, if its
+        duration changed, recompute the finish time from the same start.
+        """
+        if not self._active or self._stopping or not self._run_schedule_id or not self._started_at:
+            return
+        schedule = next(
+            (
+                item for item in self.options.get(CONF_SCHEDULES, [])
+                if item.get(CONF_SCHEDULE_ID) == self._run_schedule_id
+            ),
+            None,
+        )
+        if schedule is None:
+            # The schedule was deleted mid-run. The run keeps its own off
+            # time; only the now dangling back-reference goes away.
+            self._run_schedule_id = None
+            return
+        max_duration = int(self.options.get(CONF_MAX_DURATION, 86400))
+        seconds = max(1, min(int(schedule[CONF_SCHEDULE_DURATION]), max_duration))
+        new_finish = self._started_at + timedelta(seconds=seconds)
+        if new_finish == self._finishes_at:
+            return
+        self._finishes_at = new_finish
+        await self._save_runtime(immediate=True)
+        if self._finishes_at <= dt_util.utcnow():
+            await self.async_stop()
+        else:
+            self._arm_finish_timer()
 
     def _notify(self) -> None:
         async_dispatcher_send(self.hass, SIGNAL_UPDATE.format(entry_id=self.entry.entry_id))

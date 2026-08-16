@@ -43,7 +43,10 @@
               { entity_id: "switch.gavita_3", name: "Gavita 3", state: "on", available: true, power_entity_id: "sensor.gavita_3_power", power_w: 624.5 },
               { entity_id: "switch.gavita_4", name: "Gavita 4", state: "off", available: true, power_entity_id: "sensor.gavita_4_power", power_w: 0 },
             ],
-            schedules: [{ id: "one", time: "18:30", duration: 14400, interval: 5, days: [0, 1, 2, 3, 4, 5, 6], enabled: true }],
+            schedules: [
+              { id: "one", time: "18:30:00", duration: 14400, interval: 5, days: [0, 1, 2, 3, 4, 5, 6], enabled: true },
+              { id: "two", time: "23:00", duration: 3600, interval: 0, days: [0], enabled: false },
+            ],
           },
         },
       };
@@ -51,13 +54,50 @@
         states[`switch.gavita_${index}`] = { entity_id: `switch.gavita_${index}`, state: "off", attributes: { friendly_name: `Gavita ${index}` } };
         states[`sensor.gavita_${index}_power`] = { entity_id: `sensor.gavita_${index}_power`, state: "0", attributes: { friendly_name: `Gavita ${index} Power`, device_class: "power", unit_of_measurement: "W" } };
       }
-      const card = document.querySelector("#card");
-      card.setConfig({ entity: "sensor.indoor_next_run" });
-      card.hass = {
-        states,
-        config: { time_zone: "America/Sao_Paulo" },
-        callService: async () => {},
+      // The zone switch the header toggle drives, matched by entry_id.
+      states["switch.indoor_schedule_enabled"] = {
+        entity_id: "switch.indoor_schedule_enabled",
+        state: "on",
+        attributes: { friendly_name: "Indoor Agendamento", entry_id: "indoor-entry", zone_name: "Indoor" },
       };
+
+      const card = document.querySelector("#card");
+      const sensorId = "sensor.indoor_next_run";
+
+      // Minimal fake backend: mutates state so toggles can be exercised here.
+      function applyService(domain, service, data) {
+        const sensor = states[sensorId];
+        const attributes = { ...sensor.attributes };
+        if (domain === "homeassistant" && data.entity_id === "switch.indoor_schedule_enabled") {
+          const on = service === "turn_on";
+          states[data.entity_id] = { ...states[data.entity_id], state: on ? "on" : "off" };
+          attributes.enabled = on;
+        } else if (domain === "light_scheduler" && service === "update_schedule") {
+          attributes.schedules = attributes.schedules.map((item) =>
+            item.id === data.id ? { ...item, ...data, id: item.id } : item
+          );
+        } else if (domain === "light_scheduler" && service === "remove_schedule") {
+          attributes.schedules = attributes.schedules.filter((item) => item.id !== data.id);
+        } else {
+          console.log("callService", domain, service, data);
+          return;
+        }
+        console.log("callService", domain, service, data);
+        // A new object identity is required for the card to re-render.
+        states[sensorId] = { ...sensor, attributes };
+        push();
+      }
+
+      function push() {
+        card.hass = {
+          states,
+          config: { time_zone: "America/Sao_Paulo" },
+          callService: async (domain, service, data) => applyService(domain, service, data),
+        };
+      }
+
+      card.setConfig({ entity: sensorId });
+      push();
     </script>
   </body>
 </html>

@@ -27,6 +27,8 @@ MAX_SCHEDULE_INTERVAL = 300
 HISTORY_RETENTION_DAYS = 30
 HISTORY_MAX_ENTRIES = 200
 ACTUATION_GRACE = 15
+# Typical idle/standby draw is well under 1 W; anything above is treated as "on".
+POWER_CONFIRM_THRESHOLD_W = 1.0
 
 SOURCE_SCHEDULE = "schedule"
 SOURCE_MANUAL = "manual"

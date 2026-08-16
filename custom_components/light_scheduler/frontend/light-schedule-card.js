@@ -1,4 +1,4 @@
-const CARD_VERSION = "0.6.0";
+const CARD_VERSION = "0.7.0";
 
 class LightScheduleCard extends HTMLElement {
   constructor() {
@@ -109,6 +109,15 @@ class LightScheduleCard extends HTMLElement {
               <ha-icon icon="mdi:calendar-check-outline"></ha-icon>
               ${enabled ? "Agendada" : "Pausada"}
             </span>
+            ${this._toggleControl({
+              action: "toggle-zone-enabled",
+              checked: enabled,
+              label: "Ativar agendamento da zona",
+              title: this._scheduleSwitchEntityId()
+                ? (enabled ? "Pausar todos os agendamentos desta sala" : "Retomar os agendamentos desta sala")
+                : "Interruptor de agendamento da zona não encontrado",
+              disabled: !this._scheduleSwitchEntityId(),
+            })}
             <button class="icon-button settings" type="button" data-action="open-zone-dialog" aria-label="Configurar zona" title="Configurar zona">
               <ha-icon icon="mdi:cog-outline"></ha-icon>
             </button>
@@ -210,21 +219,40 @@ class LightScheduleCard extends HTMLElement {
     `;
   }
 
+  _toggleControl({ action, checked, label, title, dataset = {}, disabled = false }) {
+    const attributes = Object.entries(dataset)
+      .map(([key, value]) => ` data-${key}="${this._escape(value)}"`)
+      .join("");
+    return `
+      <label class="toggle" title="${this._escape(title)}">
+        <input type="checkbox" data-action="${this._escape(action)}"${attributes}
+          ${checked ? "checked" : ""} ${disabled ? "disabled" : ""} aria-label="${this._escape(label)}">
+        <span></span>
+      </label>
+    `;
+  }
+
   _scheduleRow(schedule) {
     const id = String(schedule.id || "");
-    const start = schedule.time || schedule.start || "--:--";
+    const enabled = schedule.enabled !== false;
+    const start = String(schedule.time || schedule.start || "--:--").slice(0, 5);
     const end = this._scheduleEnd(schedule);
-    const interval = Math.max(0, Number(schedule.interval || 0));
     return `
-      <button class="schedule-row ${schedule.enabled === false ? "is-disabled" : ""}" type="button" data-action="edit-schedule" data-schedule-id="${this._escape(id)}">
+      <div class="schedule-row ${enabled ? "" : "is-disabled"}">
+        ${this._toggleControl({
+          action: "toggle-schedule-enabled",
+          checked: enabled,
+          label: "Ativar agendamento",
+          title: enabled ? "Desativar este agendamento" : "Ativar este agendamento",
+          dataset: { "schedule-id": id },
+        })}
         <ha-icon class="clock" icon="mdi:clock-outline"></ha-icon>
         <span class="time-range"><strong>${this._escape(start)}</strong><i>→</i><strong>${this._escape(end)}</strong></span>
-        <b>•</b>
-        <span class="duration" title="${interval ? `Intervalo de ${interval}s entre luzes` : "Sem intervalo"}">${this._escape(this._formatDuration(schedule.duration))}${interval ? ` · ${interval}s` : ""}</span>
-        <b>•</b>
+        <span class="duration-chip" title="Duração"><ha-icon icon="mdi:timer-outline"></ha-icon>${this._escape(this._formatDuration(schedule.duration))}</span>
         <span class="days" title="${this._escape(this._formatDays(schedule.days))}">${this._escape(this._formatDays(schedule.days))}</span>
-        <ha-icon class="edit" icon="mdi:pencil"></ha-icon>
-      </button>
+        <button class="row-action" type="button" data-action="edit-schedule" data-schedule-id="${this._escape(id)}" aria-label="Editar agendamento" title="Editar"><ha-icon icon="mdi:pencil"></ha-icon></button>
+        <button class="row-action delete" type="button" data-action="delete-schedule-row" data-schedule-id="${this._escape(id)}" aria-label="Excluir agendamento" title="Excluir"><ha-icon icon="mdi:trash-can-outline"></ha-icon></button>
+      </div>
     `;
   }
 
@@ -238,18 +266,15 @@ class LightScheduleCard extends HTMLElement {
           </div>
           <input type="hidden" name="schedule_id">
           <div class="fields">
-            <label>Horário de acender<input name="start" type="time" step="1" required value="18:30"></label>
-            <label>Horário de apagar<input name="end" type="time" step="1" required value="22:30"></label>
+            <label>Horário de acender<input name="start" type="time" required value="18:30"></label>
+            <label>Horário de apagar<input name="end" type="time" required value="22:30"></label>
           </div>
           <div class="duration-preview"><ha-icon icon="mdi:timer-outline"></ha-icon><span>Ficará acesa por <strong data-duration-preview>4h</strong></span></div>
           <label class="interval-setting">
             <span><strong>Intervalo entre as luzes</strong><small>Aplicado ao acender e apagar, na mesma ordem. Use 0 para acionar todas juntas.</small></span>
             <span class="interval-input"><input name="interval" type="number" min="0" max="300" step="1" value="0" required><b>seg</b></span>
           </label>
-          <label class="schedule-enabled">
-            <input name="enabled" type="checkbox" checked>
-            <span><strong>Agendamento ativo</strong><small>Desmarque para pausar este horário sem excluí-lo.</small></span>
-          </label>
+          ${this._lightsPicker()}
           <fieldset>
             <legend>Dias da semana</legend>
             <div class="day-grid">
@@ -265,6 +290,41 @@ class LightScheduleCard extends HTMLElement {
           </div>
         </form>
       </dialog>
+    `;
+  }
+
+  _lightsPicker() {
+    const lights = this._state?.attributes?.lights || [];
+    if (!lights.length) {
+      return `<div class="lights-picker is-empty">Nenhuma luz configurada nesta zona.</div>`;
+    }
+    return `
+      <div class="lights-picker" data-lights-picker>
+        <button class="lights-summary" type="button" data-action="toggle-lights-picker" aria-expanded="false">
+          <ha-icon icon="mdi:lightbulb-group-outline"></ha-icon>
+          <span>
+            <strong data-lights-count>Todas as luzes</strong>
+            <small>Escolha quais luzes este horário controla.</small>
+          </span>
+          <ha-icon class="chevron" icon="mdi:chevron-down"></ha-icon>
+        </button>
+        <div class="lights-options" data-lights-options hidden>
+          ${lights.map((light) => {
+            const entityId = String(light.entity_id || "");
+            const name = light.name || entityId;
+            return `
+              <label class="light-choice">
+                <input type="checkbox" name="schedule_light" value="${this._escape(entityId)}" checked>
+                <span class="light-choice-name" title="${this._escape(name)}">${this._escape(name)}</span>
+              </label>
+            `;
+          }).join("")}
+          <div class="lights-bulk">
+            <button type="button" data-action="select-all-lights">Todas</button>
+            <button type="button" data-action="select-no-lights">Nenhuma</button>
+          </div>
+        </div>
+      </div>
     `;
   }
 
@@ -429,6 +489,18 @@ class LightScheduleCard extends HTMLElement {
         await this._saveSchedule();
       } else if (action === "delete-schedule") {
         await this._deleteSchedule();
+      } else if (action === "delete-schedule-row") {
+        if (await this._confirmAndRemoveSchedule(target.dataset.scheduleId)) this._render();
+      } else if (action === "toggle-schedule-enabled") {
+        await this._toggleScheduleEnabled(target);
+      } else if (action === "toggle-zone-enabled") {
+        await this._toggleZoneEnabled(target);
+      } else if (action === "toggle-lights-picker") {
+        this._toggleLightsPicker();
+      } else if (action === "select-all-lights") {
+        this._setAllLights(null, true);
+      } else if (action === "select-no-lights") {
+        this._setAllLights(null, false);
       }
     } catch (error) {
       if (action === "save-zone") {
@@ -448,9 +520,15 @@ class LightScheduleCard extends HTMLElement {
     form.elements.start.value = schedule?.time || schedule?.start || "18:30";
     form.elements.end.value = schedule ? this._scheduleEnd(schedule) : "22:30";
     form.elements.interval.value = Math.max(0, Number(schedule?.interval || 0));
-    form.elements.enabled.checked = schedule?.enabled !== false;
     const days = Array.isArray(schedule?.days) ? schedule.days.map(Number) : [0, 1, 2, 3, 4, 5, 6];
     form.querySelectorAll('input[name="day"]').forEach((input) => { input.checked = days.includes(Number(input.value)); });
+    // An empty stored list means the whole zone, so everything starts checked.
+    const chosen = Array.isArray(schedule?.target_entity_ids) ? schedule.target_entity_ids : [];
+    form.querySelectorAll('input[name="schedule_light"]').forEach((input) => {
+      input.checked = !chosen.length || chosen.includes(input.value);
+    });
+    this._collapseLightsPicker(form);
+    this._updateLightsCount(form);
     dialog.querySelector("[data-dialog-title]").textContent = schedule ? "Editar agendamento" : "Novo agendamento";
     dialog.querySelector("[data-action='delete-schedule']").hidden = !schedule;
     this._showDialogError("");
@@ -467,12 +545,24 @@ class LightScheduleCard extends HTMLElement {
       this._showDialogError("Selecione pelo menos um dia da semana.");
       return;
     }
+    const allLights = [...form.querySelectorAll('input[name="schedule_light"]')];
+    const chosenLights = allLights.filter((input) => input.checked);
+    if (allLights.length && !chosenLights.length) {
+      this._showDialogError("Selecione pelo menos uma luz para este horário.");
+      this._expandLightsPicker(form);
+      return;
+    }
     const data = {
       entry_id: this._entryId(),
       time: form.elements.start.value,
       duration: this._durationBetween(form.elements.start.value, form.elements.end.value),
       interval: Math.max(0, Math.min(300, Math.round(Number(form.elements.interval.value) || 0))),
-      enabled: form.elements.enabled.checked,
+      // Everything checked is stored as "the whole zone" rather than a frozen
+      // list, so a light added to the zone later joins this schedule too.
+      target_entity_ids:
+        chosenLights.length === allLights.length
+          ? []
+          : chosenLights.map((input) => input.value),
       days,
     };
     const scheduleId = form.elements.schedule_id.value;
@@ -485,10 +575,116 @@ class LightScheduleCard extends HTMLElement {
   async _deleteSchedule() {
     const dialog = this._dialog();
     const scheduleId = dialog?.querySelector('[name="schedule_id"]')?.value;
-    if (!scheduleId || !window.confirm("Excluir este agendamento?")) return;
+    if (await this._confirmAndRemoveSchedule(scheduleId)) {
+      dialog.close();
+      this._render();
+    }
+  }
+
+  async _confirmAndRemoveSchedule(scheduleId) {
+    if (!scheduleId || !window.confirm("Excluir este agendamento?")) return false;
     await this._hass.callService("light_scheduler", "remove_schedule", { entry_id: this._entryId(), id: scheduleId });
-    dialog.close();
+    return true;
+  }
+
+  _scheduleSwitchEntityId() {
+    const entryId = this._state?.attributes?.entry_id;
+    if (!entryId || !this._hass?.states) return "";
+    const match = Object.values(this._hass.states).find(
+      (state) =>
+        state.entity_id?.startsWith("switch.") &&
+        state.attributes?.entry_id === entryId
+    );
+    return match?.entity_id || "";
+  }
+
+  async _toggleZoneEnabled(checkbox) {
+    // Goes through the zone switch rather than the options service: only the
+    // switch also stops a run that is already on when the zone is paused.
+    const entityId = this._scheduleSwitchEntityId();
+    if (!entityId) {
+      checkbox.checked = !checkbox.checked;
+      return;
+    }
+    try {
+      await this._hass.callService(
+        "homeassistant",
+        checkbox.checked ? "turn_on" : "turn_off",
+        { entity_id: entityId }
+      );
+    } catch (error) {
+      checkbox.checked = !checkbox.checked;
+      throw error;
+    }
+  }
+
+  async _toggleScheduleEnabled(checkbox) {
+    const scheduleId = checkbox.dataset.scheduleId;
+    if (!scheduleId) return;
+    try {
+      await this._hass.callService("light_scheduler", "update_schedule", {
+        entry_id: this._entryId(),
+        id: scheduleId,
+        enabled: checkbox.checked,
+      });
+    } catch (error) {
+      checkbox.checked = !checkbox.checked;
+      throw error;
+    }
     this._render();
+  }
+
+  _lightsPickerElements(scope) {
+    const root = scope || this._dialog();
+    return {
+      picker: root?.querySelector("[data-lights-picker]"),
+      summary: root?.querySelector("[data-action='toggle-lights-picker']"),
+      options: root?.querySelector("[data-lights-options]"),
+      count: root?.querySelector("[data-lights-count]"),
+      inputs: [...(root?.querySelectorAll('input[name="schedule_light"]') || [])],
+    };
+  }
+
+  _setLightsPickerOpen(scope, open) {
+    const { picker, summary, options } = this._lightsPickerElements(scope);
+    if (!picker || !options || !summary) return;
+    options.hidden = !open;
+    picker.classList.toggle("is-open", open);
+    summary.setAttribute("aria-expanded", String(open));
+  }
+
+  _expandLightsPicker(scope) {
+    this._setLightsPickerOpen(scope, true);
+  }
+
+  _collapseLightsPicker(scope) {
+    this._setLightsPickerOpen(scope, false);
+  }
+
+  _toggleLightsPicker(scope) {
+    const { options } = this._lightsPickerElements(scope);
+    this._setLightsPickerOpen(scope, Boolean(options?.hidden));
+  }
+
+  _setAllLights(scope, checked) {
+    const { inputs } = this._lightsPickerElements(scope);
+    inputs.forEach((input) => { input.checked = checked; });
+    this._updateLightsCount(scope);
+  }
+
+  _updateLightsCount(scope) {
+    const { count, inputs } = this._lightsPickerElements(scope);
+    if (!count) return;
+    const chosen = inputs.filter((input) => input.checked).length;
+    if (!inputs.length) {
+      count.textContent = "Nenhuma luz configurada";
+    } else if (chosen === inputs.length) {
+      count.textContent = `Todas as luzes (${inputs.length})`;
+    } else if (chosen === 0) {
+      count.textContent = "Nenhuma luz selecionada";
+    } else {
+      count.textContent = `${chosen} de ${inputs.length} luzes selecionadas`;
+    }
   }
 
   _dialog() {
@@ -587,6 +783,10 @@ class LightScheduleCard extends HTMLElement {
     }
     if (event.target.matches('[name="start"], [name="end"]')) {
       this._updateDurationPreview(event.target.form);
+      return;
+    }
+    if (event.target.matches('[name="schedule_light"]')) {
+      this._updateLightsCount();
     }
   }
 
@@ -893,7 +1093,7 @@ class LightScheduleCard extends HTMLElement {
         .shell { padding: 12px 14px 13px; }
         .loading, .error { padding: 18px; font-size: 14px; }
         .error { color: var(--error-color); }
-        .header { display: grid; grid-template-columns: 34px minmax(0, 1fr) auto 30px; align-items: center; gap: 8px; }
+        .header { display: grid; grid-template-columns: 34px minmax(0, 1fr) auto auto 30px; align-items: center; gap: 8px; }
         .room-icon { width: 32px; height: 32px; display: grid; place-items: center; border-radius: 50%; background: rgba(128,128,128,.22); color: var(--secondary-text-color); }
         .room-icon ha-icon { --mdc-icon-size: 20px; }
         h2 { margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 20px; line-height: 1.2; font-weight: 700; }
@@ -951,16 +1151,29 @@ class LightScheduleCard extends HTMLElement {
         .empty-lights strong { font-size: 11px; }
         .empty-lights small { margin-top: 2px; color: var(--secondary-text-color); font-size: 9px; }
         .schedules { display: grid; gap: 4px; }
-        .schedule-row { width: 100%; min-width: 0; height: 35px; padding: 0 8px; display: grid; grid-template-columns: 19px 104px 8px 68px 8px minmax(0,1fr) 20px; align-items: center; gap: 3px; text-align: left; border: 1px solid rgba(127,127,127,.22); border-radius: 6px; background: rgba(127,127,127,.04); cursor: pointer; }
-        .schedule-row:hover { background: rgba(127,127,127,.1); }
+        .schedule-row { width: 100%; min-width: 0; height: 35px; padding: 0 8px; display: grid; grid-template-columns: 30px 18px 92px auto minmax(0,1fr) 24px 24px; align-items: center; gap: 6px; text-align: left; border: 1px solid rgba(127,127,127,.22); border-radius: 6px; background: rgba(127,127,127,.04); }
+        .schedule-row:hover { background: rgba(127,127,127,.08); }
         .schedule-row.is-disabled { opacity: .55; }
-        .schedule-row .clock, .schedule-row .edit { --mdc-icon-size: 16px; color: var(--ls-blue); }
+        .schedule-row .clock { --mdc-icon-size: 16px; color: var(--ls-blue); }
         .schedule-row strong { font-size: 11px; }
-        .time-range { display: inline-flex; align-items: center; justify-content: space-between; gap: 4px; white-space: nowrap; }
+        .time-range { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; overflow: hidden; }
         .time-range i { color: var(--ls-blue); font-style: normal; font-size: 10px; }
-        .schedule-row b { color: var(--ls-blue); text-align: center; font-size: 10px; }
-        .schedule-row .duration, .schedule-row .days { color: var(--secondary-text-color); font-size: 9px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-        .schedule-row .edit { justify-self: end; }
+        .schedule-row .days { color: var(--secondary-text-color); font-size: 9px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .toggle { position: relative; width: 30px; height: 18px; flex: none; }
+        .toggle input { position: absolute; inset: 0; margin: 0; opacity: 0; cursor: pointer; }
+        .toggle input:disabled { cursor: default; }
+        .toggle span { position: absolute; inset: 0; border-radius: 999px; background: rgba(127,127,127,.4); transition: background .15s ease; pointer-events: none; }
+        .toggle span::before { content: ""; position: absolute; top: 2px; left: 2px; width: 14px; height: 14px; border-radius: 50%; background: #fff; box-shadow: 0 1px 2px rgba(0,0,0,.35); transition: transform .15s ease; }
+        .toggle input:checked + span { background: var(--ls-green); }
+        .toggle input:checked + span::before { transform: translateX(12px); }
+        .toggle input:focus-visible + span { outline: 2px solid var(--ls-blue); outline-offset: 2px; }
+        .toggle input:disabled + span { opacity: .45; }
+        .duration-chip { display: inline-flex; align-items: center; gap: 3px; padding: 3px 8px; border-radius: 999px; background: rgba(33,150,243,.14); color: var(--ls-blue); font-size: 10px; font-weight: 700; white-space: nowrap; }
+        .duration-chip ha-icon { --mdc-icon-size: 12px; }
+        .row-action { width: 24px; height: 24px; padding: 0; display: grid; place-items: center; border: 0; border-radius: 50%; color: var(--secondary-text-color); background: transparent; cursor: pointer; }
+        .row-action:hover { background: rgba(33,150,243,.14); color: var(--ls-blue); }
+        .row-action.delete:hover { background: rgba(255,80,80,.12); color: var(--error-color); }
+        .row-action ha-icon { --mdc-icon-size: 15px; }
         .empty-schedule { padding: 9px; border: 1px dashed rgba(127,127,127,.35); border-radius: 6px; color: var(--secondary-text-color); text-align: center; font-size: 10px; }
         .add-button { width: 100%; height: 31px; margin-top: 5px; display: flex; align-items: center; justify-content: center; gap: 6px; border: 1px solid rgba(127,127,127,.22); border-radius: 6px; background: transparent; color: var(--ls-blue); font-size: 10px; cursor: pointer; }
         .add-button:hover { background: rgba(33,150,243,.08); }
@@ -994,11 +1207,24 @@ class LightScheduleCard extends HTMLElement {
         .interval-input:focus-within { border-color: var(--ls-blue); }
         .interval-input input { width: 100%; min-width: 0; height: 100%; padding: 0 5px 0 8px; border: 0; outline: 0; color: var(--primary-text-color); background: transparent; }
         .interval-input b { color: var(--secondary-text-color); font-size: 9px; font-weight: 400; }
-        .schedule-enabled { min-height: 42px; margin-top: 10px; padding: 7px 10px; display: flex; align-items: center; gap: 9px; border: 1px solid rgba(127,127,127,.24); border-radius: 6px; cursor: pointer; }
-        .schedule-enabled input { width: 17px; height: 17px; accent-color: var(--ls-blue); }
-        .schedule-enabled strong, .schedule-enabled small { display: block; }
-        .schedule-enabled strong { font-size: 11px; }
-        .schedule-enabled small { margin-top: 2px; color: var(--secondary-text-color); font-size: 9px; }
+        .lights-picker { margin-top: 10px; border: 1px solid rgba(127,127,127,.24); border-radius: 6px; overflow: hidden; }
+        .lights-picker.is-empty { padding: 10px; color: var(--secondary-text-color); text-align: center; font-size: 10px; }
+        .lights-summary { width: 100%; min-height: 52px; padding: 8px 10px; display: grid; grid-template-columns: 20px minmax(0,1fr) 18px; align-items: center; gap: 9px; text-align: left; border: 0; background: transparent; cursor: pointer; }
+        .lights-summary:hover { background: rgba(127,127,127,.07); }
+        .lights-summary > ha-icon:first-child { --mdc-icon-size: 19px; color: var(--ls-blue); }
+        .lights-summary strong, .lights-summary small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .lights-summary strong { font-size: 11px; }
+        .lights-summary small { margin-top: 3px; color: var(--secondary-text-color); font-size: 9px; }
+        .lights-summary .chevron { --mdc-icon-size: 18px; color: var(--secondary-text-color); transition: transform .15s ease; }
+        .lights-picker.is-open .chevron { transform: rotate(180deg); }
+        .lights-options { padding: 2px 10px 9px; border-top: 1px solid rgba(127,127,127,.2); }
+        .lights-options[hidden] { display: none; }
+        .light-choice { min-height: 34px; display: flex; align-items: center; gap: 9px; cursor: pointer; }
+        .light-choice input { width: 16px; height: 16px; flex: none; accent-color: var(--ls-blue); }
+        .light-choice-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; }
+        .lights-bulk { margin-top: 6px; padding-top: 7px; display: flex; gap: 6px; border-top: 1px solid rgba(127,127,127,.16); }
+        .lights-bulk button { height: 26px; padding: 0 10px; border: 1px solid rgba(127,127,127,.32); border-radius: 5px; background: transparent; color: var(--ls-blue); font-size: 10px; cursor: pointer; }
+        .lights-bulk button:hover { background: rgba(33,150,243,.1); }
         fieldset { margin: 16px 0 0; padding: 0; border: 0; }
         .day-grid { margin-top: 7px; display: grid; grid-template-columns: repeat(7,1fr); gap: 4px; }
         .day-grid input { position: absolute; opacity: 0; pointer-events: none; }
@@ -1043,7 +1269,7 @@ class LightScheduleCard extends HTMLElement {
           .summary strong { font-size: 20px; }
           .power-total strong { font-size: 19px; }
           .power-pill { display: none; }
-          .schedule-row { grid-template-columns: 18px 96px 7px 58px 7px minmax(0,1fr) 18px; padding-inline: 6px; }
+          .schedule-row { grid-template-columns: 26px 16px 84px auto minmax(0,1fr) 22px 22px; padding-inline: 6px; gap: 4px; }
         }
         @media (max-width: 560px) {
           .mapping-header { display: none; }

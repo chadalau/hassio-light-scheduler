@@ -5,6 +5,10 @@ turn_on_now:
     entity:
       integration: light_scheduler
   fields:
+    entry_id:
+      name: ID da zona
+      description: Alternativa ao target - identifica a zona diretamente pelo config entry.
+      selector: {text: {}}
     duration:
       name: Duração
       description: Duração em segundos.
@@ -20,12 +24,21 @@ stop:
   target:
     entity:
       integration: light_scheduler
+  fields:
+    entry_id:
+      name: ID da zona
+      description: Alternativa ao target - identifica a zona diretamente pelo config entry.
+      selector: {text: {}}
 add_schedule:
   name: Adicionar agendamento
   target:
     entity:
       integration: light_scheduler
   fields:
+    entry_id:
+      name: ID da zona
+      description: Alternativa ao target - identifica a zona diretamente pelo config entry.
+      selector: {text: {}}
     time:
       required: true
       selector: {time: {}}
@@ -50,12 +63,20 @@ add_schedule:
       description: Espera em segundos entre cada luz ao acender e ao apagar. Use 0 para acionar todas sem espera.
       default: 0
       selector: {number: {min: 0, max: 300, unit_of_measurement: s, mode: box}}
+    target_entity_ids:
+      name: Luzes deste horário
+      description: Deixe vazio para usar todas as luzes da zona.
+      selector: {entity: {multiple: true, filter: [{domain: light}, {domain: switch}]}}
 remove_schedule:
   name: Remover agendamento
   target:
     entity:
       integration: light_scheduler
   fields:
+    entry_id:
+      name: ID da zona
+      description: Alternativa ao target - identifica a zona diretamente pelo config entry.
+      selector: {text: {}}
     id:
       required: true
       selector: {text: {}}
@@ -65,6 +86,10 @@ update_schedule:
     entity:
       integration: light_scheduler
   fields:
+    entry_id:
+      name: ID da zona
+      description: Alternativa ao target - identifica a zona diretamente pelo config entry.
+      selector: {text: {}}
     id:
       required: true
       selector: {text: {}}
@@ -87,6 +112,10 @@ update_schedule:
     interval:
       name: Intervalo entre luzes
       selector: {number: {min: 0, max: 300, unit_of_measurement: s, mode: box}}
+    target_entity_ids:
+      name: Luzes deste horário
+      description: Deixe vazio para usar todas as luzes da zona.
+      selector: {entity: {multiple: true, filter: [{domain: light}, {domain: switch}]}}
     enabled:
       selector: {boolean: {}}
 set_schedules:
@@ -95,6 +124,10 @@ set_schedules:
     entity:
       integration: light_scheduler
   fields:
+    entry_id:
+      name: ID da zona
+      description: Alternativa ao target - identifica a zona diretamente pelo config entry.
+      selector: {text: {}}
     schedules:
       required: true
       selector: {object: {}}
@@ -104,6 +137,10 @@ set_zone_options:
     entity:
       integration: light_scheduler
   fields:
+    entry_id:
+      name: ID da zona
+      description: Alternativa ao target - identifica a zona diretamente pelo config entry.
+      selector: {text: {}}
     entity_mappings:
       name: Entradas de iluminação
       description: Lista ordenada com nome, luz ou tomada e sensor de potência.

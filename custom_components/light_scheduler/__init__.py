@@ -47,6 +47,7 @@ from .const import (
     SERVICE_TURN_ON_NOW,
     SERVICE_UPDATE_SCHEDULE,
 )
+from .power import is_power_sensor
 from .schedules import new_schedule
 from .scheduler import LightScheduler
 from .store import RuntimeStore
@@ -78,6 +79,19 @@ SCHEDULE_SCHEMA = vol.Schema(
         vol.Optional(CONF_SCHEDULE_INTERVAL, default=0): vol.All(
             vol.Coerce(int),
             vol.Range(min=0, max=MAX_SCHEDULE_INTERVAL),
+        ),
+        # Empty means every light in the zone, so narrowing is opt-in.
+        vol.Optional(CONF_TARGET_ENTITY_IDS, default=list): vol.All(
+            cv.ensure_list,
+            [
+                vol.All(
+                    cv.string,
+                    vol.Match(
+                        r"^(light|switch)\.",
+                        msg="Cada luz do agendamento precisa ser light ou switch.",
+                    ),
+                )
+            ],
         ),
         vol.Optional(CONF_ENABLED, default=True): cv.boolean,
     }
@@ -122,10 +136,7 @@ def _normalize_mappings(
                 f"Medidor de potência repetido: {power}"
             )
         power_state = hass.states.get(power) if power else None
-        if power_state and not (
-            power_state.attributes.get("device_class") == "power"
-            or power_state.attributes.get("unit_of_measurement") in ("W", "kW")
-        ):
+        if power_state and not is_power_sensor(power_state):
             raise ServiceValidationError(
                 f"A entidade {power} não é um sensor de potência."
             )
@@ -381,6 +392,7 @@ async def _register_services(hass: HomeAssistant) -> None:
             CONF_SCHEDULE_DAYS,
             CONF_SCHEDULE_DURATION,
             CONF_SCHEDULE_INTERVAL,
+            CONF_TARGET_ENTITY_IDS,
             CONF_ENABLED,
         }
         unknown = set(data) - allowed

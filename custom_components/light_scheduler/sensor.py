@@ -14,8 +14,7 @@ from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.event import async_track_state_change_event
 
 from .const import SIGNAL_UPDATE
-
-POWER_UNITS = {"W": 1.0, "kW": 1000.0}
+from .power import is_power_sensor, read_power_watts
 
 
 async def async_setup_entry(
@@ -81,13 +80,7 @@ class LightScheduleStatus(SensorEntity):
             if entity.domain != "sensor" or not entity.device_id:
                 continue
             state = self.hass.states.get(entity.entity_id)
-            if state is None:
-                continue
-            is_power = (
-                state.attributes.get("device_class") == "power"
-                or state.attributes.get("unit_of_measurement") in POWER_UNITS
-            )
-            if is_power:
+            if is_power_sensor(state):
                 device_power.setdefault(entity.device_id, []).append(entity.entity_id)
 
         for index, target_id in enumerate(targets):
@@ -99,10 +92,7 @@ class LightScheduleStatus(SensorEntity):
             )
             selected = configured.get(target_id)
             selected_state = self.hass.states.get(selected) if selected else None
-            if selected in used or selected_state is None or not (
-                selected_state.attributes.get("device_class") == "power"
-                or selected_state.attributes.get("unit_of_measurement") in POWER_UNITS
-            ):
+            if selected in used or not is_power_sensor(selected_state):
                 selected = None
             if selected is None:
                 selected = next(
@@ -134,19 +124,7 @@ class LightScheduleStatus(SensorEntity):
 
     def _power_watts(self, entity_id: str | None) -> float | None:
         """Return a power sensor value normalized to watts."""
-        if not entity_id:
-            return None
-        state = self.hass.states.get(entity_id)
-        if state is None or state.state in (STATE_UNKNOWN, STATE_UNAVAILABLE):
-            return None
-        try:
-            value = float(state.state)
-        except (TypeError, ValueError):
-            return None
-        multiplier = POWER_UNITS.get(
-            state.attributes.get("unit_of_measurement"), 1.0
-        )
-        return round(value * multiplier, 2)
+        return read_power_watts(self.hass, entity_id) if entity_id else None
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
