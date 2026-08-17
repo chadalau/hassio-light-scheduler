@@ -18,7 +18,7 @@ from .const import (ACTUATION_GRACE, CONF_DEFAULT_DURATION, CONF_ENABLED, CONF_E
                     CONF_POWER_ENTITY_IDS, CONF_SCHEDULE_DAYS, CONF_SCHEDULE_DURATION, CONF_SCHEDULE_ID,
                     CONF_SCHEDULE_INTERVAL, CONF_SCHEDULE_TIME, CONF_SCHEDULES, CONF_TARGET_ENTITY_IDS,
                     HISTORY_MAX_ENTRIES, HISTORY_RETENTION_DAYS, MAX_SCHEDULE_INTERVAL, POWER_CONFIRM_THRESHOLD_W,
-                    SIGNAL_UPDATE, SOURCE_EXTERNAL, SOURCE_MANUAL, SOURCE_SCHEDULE)
+                    SERVICE_CALL_TIMEOUT, SIGNAL_UPDATE, SOURCE_EXTERNAL, SOURCE_MANUAL, SOURCE_SCHEDULE)
 from .power import read_power_watts
 from .store import RuntimeStore
 from .next_run import find_next_run
@@ -187,11 +187,22 @@ class LightScheduler:
             0, min(int(value.get("interval") or 0), MAX_SCHEDULE_INTERVAL)
         )
         self._run_schedule_id = str(value["schedule_id"]) if value.get("schedule_id") else None
+        # Lights dropped from the zone while this run was persisted are
+        # discarded: keeping them would make the stop sequence burn a full
+        # grace period plus a retry confirming an entity that cannot answer.
+        # Falling back to the whole zone is safe because recovery only ever
+        # turns targets off.
         stored_targets = value.get("targets")
+        configured = self.target_entity_ids
         self._run_targets = (
-            [str(entity_id) for entity_id in stored_targets]
+            [
+                str(entity_id)
+                for entity_id in stored_targets
+                if str(entity_id) in configured
+            ]
+            or list(configured)
             if isinstance(stored_targets, list)
-            else list(self.target_entity_ids)
+            else list(configured)
         )
 
     def _arm_finish_timer(self) -> None:
@@ -306,6 +317,7 @@ class LightScheduler:
                     self._finishes_at = candidate_finish
                     self._arm_finish_timer()
                     await self._save_runtime(immediate=True)
+                await self._async_extend_targets(schedule)
                 self._schedule_next()
                 return
             await self.async_turn_on(
@@ -317,6 +329,67 @@ class LightScheduler:
             )
         else:
             self._schedule_next()
+
+    def _selected_targets(self, entity_ids: list[str] | None) -> list[str]:
+        """Narrow the zone to a selection, keeping the zone's own order.
+
+        An empty or missing selection means the whole zone, so a light added
+        to the zone later joins schedules the user never narrowed.
+        """
+        selected = set(entity_ids or ())
+        return [
+            entity_id
+            for entity_id in self.target_entity_ids
+            if not selected or entity_id in selected
+        ]
+
+    def _available(self, entity_ids: list[str]) -> list[str]:
+        """Keep only entities Home Assistant can currently act on."""
+        available: list[str] = []
+        for entity_id in entity_ids:
+            state = self.hass.states.get(entity_id)
+            if state and state.state not in (STATE_UNAVAILABLE, STATE_UNKNOWN):
+                available.append(entity_id)
+        return available
+
+    async def _async_extend_targets(self, schedule: dict[str, Any]) -> None:
+        """Turn on the lights a colliding schedule adds to the running one.
+
+        Extending only the off time was enough while every schedule drove the
+        whole zone. Now that a schedule carries its own selection, a wider
+        schedule firing over a narrower run must also light what it adds, or
+        those lights stay dark for the entire extended run and are never
+        turned off at the end either.
+
+        The additions are not staggered: the interval exists to spread inrush
+        at startup, and holding this timer callback open for a full stagger
+        would delay the rest of the run's bookkeeping.
+        """
+        if self._stopping or self._unloading or not self._active:
+            return
+        added = self._available(
+            [
+                entity_id
+                for entity_id in self._selected_targets(
+                    schedule.get(CONF_TARGET_ENTITY_IDS)
+                )
+                if entity_id not in self._run_targets
+            ]
+        )
+        if not added:
+            return
+        self._run_targets.extend(added)
+        await self._save_runtime(immediate=True)
+        for entity_id in added:
+            if self._stopping or self._unloading:
+                return
+            await self._dispatch(entity_id, "turn_on")
+        unconfirmed = await self._confirm_group(added, "turn_on", True)
+        if unconfirmed:
+            self._run_warnings = list(
+                dict.fromkeys([*self._run_warnings, *unconfirmed])
+            )
+            self._notify()
 
     def _power_entity_for(self, entity_id: str) -> str | None:
         """Return the power sensor explicitly paired with a target, if any."""
@@ -348,10 +421,23 @@ class LightScheduler:
         return (watts > POWER_CONFIRM_THRESHOLD_W) == expect_on
 
     async def _dispatch(self, entity_id: str, service: str) -> None:
-        """Send one turn_on/turn_off call without waiting for confirmation."""
+        """Send one turn_on/turn_off call without waiting for confirmation.
+
+        The call is bounded: a device integration that never returns would
+        otherwise stall the whole shutdown sequence, the finish timer and
+        unload behind a single unresponsive entity. A timeout is reported and
+        the sequence moves on; confirmation still decides whether the entity
+        actually obeyed.
+        """
         try:
-            await self.hass.services.async_call(
-                "homeassistant", service, {"entity_id": entity_id}, blocking=True
+            async with asyncio.timeout(SERVICE_CALL_TIMEOUT):
+                await self.hass.services.async_call(
+                    "homeassistant", service, {"entity_id": entity_id}, blocking=True
+                )
+        except TimeoutError:
+            _LOGGER.warning(
+                "%s for %s in %s did not return within %ss; continuing",
+                service, entity_id, self.entry.title, SERVICE_CALL_TIMEOUT,
             )
         except Exception:  # Home Assistant reports the failing entity.
             _LOGGER.exception(
@@ -415,22 +501,17 @@ class LightScheduler:
         `entity_ids` narrows the run to part of the zone; empty or None keeps
         the whole zone, so a light added later joins existing schedules.
         """
-        if self._active:
+        if self._active or self._unloading:
             # Repeated clicks and overlapping schedules must never invert the
             # current run. The dedicated stop action is the only way to end it.
+            # A timer that fires in the gap before unload cancels its listener
+            # must not start actuating either.
             return
         max_duration = int(self.options.get(CONF_MAX_DURATION, 86400))
         seconds = duration if duration is not None else int(self.options.get(CONF_DEFAULT_DURATION, 14400))
         seconds = max(1, min(int(seconds), max_duration))
         interval = max(0, min(int(interval), MAX_SCHEDULE_INTERVAL))
-        selected = set(entity_ids or ())
-        targets: list[str] = []
-        for entity_id in self.target_entity_ids:
-            if selected and entity_id not in selected:
-                continue
-            state = self.hass.states.get(entity_id)
-            if state and state.state not in (STATE_UNAVAILABLE, STATE_UNKNOWN):
-                targets.append(entity_id)
+        targets = self._available(self._selected_targets(entity_ids))
         if not targets:
             _LOGGER.warning("No available lights in %s", self.entry.title)
             self._schedule_next(); return
@@ -443,6 +524,7 @@ class LightScheduler:
         self._started_at = dt_util.utcnow()
         self._finishes_at = self._started_at + timedelta(seconds=seconds)
         self._arm_finish_timer()
+        await self._close_external_records(targets)
         await self._save_runtime(immediate=True)
         self._schedule_next()
 
@@ -544,12 +626,49 @@ class LightScheduler:
         if schedule_next:
             self._schedule_next()
 
+    async def _close_external_records(self, entity_ids: list[str]) -> None:
+        """Close open external records for lights this run is taking over.
+
+        Light changes are ignored while a run is active, so a record left open
+        across the run would only be closed by the light's off event afterwards
+        and would report a duration that swallowed the whole run.
+        """
+        now = dt_util.utcnow()
+        closed = False
+        for item in self._history:
+            if (
+                item.get("source") != SOURCE_EXTERNAL
+                or item.get("entity_id") not in entity_ids
+                or item.get("finished_at")
+            ):
+                continue
+            raw_started = item.get("started_at")
+            started = (
+                dt_util.parse_datetime(raw_started)
+                if isinstance(raw_started, str)
+                else None
+            )
+            item["finished_at"] = now.isoformat()
+            item["duration"] = (
+                max(0, int((now - dt_util.as_utc(started)).total_seconds()))
+                if started
+                else None
+            )
+            closed = True
+        if closed:
+            await self._save_history()
+
     async def _save_history(self) -> None:
         self._prune_history()
         await self._save_runtime()
 
     def _prune_history(self) -> None:
-        """Remove expired history records with a single timestamp parse."""
+        """Remove expired history records with a single timestamp parse.
+
+        A record whose ``started_at`` cannot be parsed is dropped rather than
+        kept: retaining it meant an unreadable entry survived forever while
+        still counting against the entry cap, slowly crowding out real runs.
+        """
         cutoff = dt_util.utcnow() - timedelta(days=HISTORY_RETENTION_DAYS)
         retained: list[dict[str, Any]] = []
         for item in self._history:
@@ -559,7 +678,7 @@ class LightScheduler:
                 if isinstance(raw_started, str)
                 else None
             )
-            if not started or dt_util.as_utc(started) >= cutoff:
+            if started and dt_util.as_utc(started) >= cutoff:
                 retained.append(item)
         self._history = retained[-HISTORY_MAX_ENTRIES:]
 

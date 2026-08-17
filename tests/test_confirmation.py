@@ -1,116 +1,19 @@
 """Regression tests for grouped actuation confirmation.
 
-The scheduler is loaded with minimal Home Assistant stubs so the timing
-guarantees can be asserted without a running Home Assistant.
+The scheduler is loaded against the shared Home Assistant stubs so the
+timing guarantees can be asserted without a running Home Assistant.
 """
 
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
-from pathlib import Path
-import sys
 import time
-import types
 import unittest
 
+from ha_stubs import FakeState, load_scheduler, make_scheduler
 
-PACKAGE_DIR = Path(__file__).parents[1] / "custom_components" / "light_scheduler"
-
-
-def _install_homeassistant_stubs() -> None:
-    """Register the small slice of Home Assistant the scheduler imports."""
-    if "homeassistant" in sys.modules:
-        return
-
-    def module(name: str, **attributes: object) -> types.ModuleType:
-        created = types.ModuleType(name)
-        for key, value in attributes.items():
-            setattr(created, key, value)
-        sys.modules[name] = created
-        return created
-
-    module("homeassistant")
-    module("homeassistant.config_entries", ConfigEntry=object)
-    module(
-        "homeassistant.const",
-        EVENT_HOMEASSISTANT_STARTED="homeassistant_started",
-        STATE_OFF="off",
-        STATE_ON="on",
-        STATE_UNAVAILABLE="unavailable",
-        STATE_UNKNOWN="unknown",
-        Platform=types.SimpleNamespace(
-            SWITCH="switch", SENSOR="sensor", BINARY_SENSOR="binary_sensor"
-        ),
-    )
-    module(
-        "homeassistant.core",
-        CoreState=types.SimpleNamespace(running="running"),
-        Event=object,
-        HomeAssistant=object,
-        State=object,
-        callback=lambda func: func,
-    )
-    module("homeassistant.helpers")
-    module("homeassistant.helpers.dispatcher", async_dispatcher_send=lambda *a, **k: None)
-    module(
-        "homeassistant.helpers.event",
-        async_track_point_in_time=lambda *a, **k: (lambda: None),
-        async_track_state_change_event=lambda *a, **k: (lambda: None),
-    )
-    module("homeassistant.helpers.storage", Store=object)
-    module("homeassistant.util")
-    module(
-        "homeassistant.util.dt",
-        utcnow=lambda: datetime.now(timezone.utc),
-        now=lambda: datetime.now(timezone.utc),
-        parse_datetime=lambda value: None,
-        as_utc=lambda value: value,
-    )
-
-
-def _load_scheduler() -> types.ModuleType:
-    """Import the scheduler module without executing the package __init__."""
-    _install_homeassistant_stubs()
-    if "light_scheduler" not in sys.modules:
-        package = types.ModuleType("light_scheduler")
-        package.__path__ = [str(PACKAGE_DIR)]
-        sys.modules["light_scheduler"] = package
-    import light_scheduler.scheduler as scheduler_module
-
-    return scheduler_module
-
-
-SCHEDULER = _load_scheduler()
+SCHEDULER = load_scheduler()
 GRACE = 0.1
-
-
-class FakeState:
-    def __init__(self, state: str, **attributes: object) -> None:
-        self.state = state
-        self.attributes = dict(attributes)
-
-
-class FakeHass:
-    """Records service calls and serves whatever states the test sets."""
-
-    def __init__(self, states: dict[str, FakeState]) -> None:
-        self.states = types.SimpleNamespace(get=states.get)
-        self.calls: list[tuple[str, str]] = []
-        self.services = types.SimpleNamespace(async_call=self._async_call)
-
-    async def _async_call(self, domain, service, data, blocking=False):
-        self.calls.append((service, data["entity_id"]))
-
-
-def _make_scheduler(states, options=None):
-    entry = types.SimpleNamespace(
-        entry_id="entry", title="Sala", domain="light_scheduler",
-        options=options or {},
-    )
-    hass = FakeHass(states)
-    scheduler = SCHEDULER.LightScheduler(hass, entry, store=None)
-    return scheduler, hass
 
 
 class ConfirmGroupTests(unittest.TestCase):
@@ -127,7 +30,7 @@ class ConfirmGroupTests(unittest.TestCase):
         entities = [f"light.sala_{index}" for index in range(6)]
         # Every light stays off while we ask it to turn on: nothing confirms.
         states = {entity: FakeState("off") for entity in entities}
-        scheduler, hass = _make_scheduler(states)
+        scheduler, hass = make_scheduler(SCHEDULER, states)
 
         started = time.monotonic()
         pending = asyncio.run(scheduler._confirm_group(entities, "turn_on", True))
@@ -143,7 +46,7 @@ class ConfirmGroupTests(unittest.TestCase):
     def test_confirmed_group_returns_immediately(self) -> None:
         entities = ["light.a", "light.b"]
         states = {entity: FakeState("on") for entity in entities}
-        scheduler, hass = _make_scheduler(states)
+        scheduler, hass = make_scheduler(SCHEDULER, states)
 
         started = time.monotonic()
         pending = asyncio.run(scheduler._confirm_group(entities, "turn_on", True))
@@ -155,7 +58,7 @@ class ConfirmGroupTests(unittest.TestCase):
 
     def test_only_unconfirmed_entities_are_retried(self) -> None:
         states = {"light.ok": FakeState("on"), "light.mudo": FakeState("off")}
-        scheduler, hass = _make_scheduler(states)
+        scheduler, hass = make_scheduler(SCHEDULER, states)
 
         pending = asyncio.run(
             scheduler._confirm_group(["light.ok", "light.mudo"], "turn_on", True)
@@ -183,7 +86,7 @@ class PowerConfirmationTests(unittest.TestCase):
             "light.sala": FakeState("on"),
             "sensor.sala_w": FakeState("0.2", device_class="power"),
         }
-        scheduler, _ = _make_scheduler(states, self.OPTIONS)
+        scheduler, _ = make_scheduler(SCHEDULER, states, self.OPTIONS)
 
         self.assertFalse(
             scheduler._is_confirmed("light.sala", True, "sensor.sala_w")
@@ -194,7 +97,7 @@ class PowerConfirmationTests(unittest.TestCase):
             "light.sala": FakeState("on"),
             "sensor.sala_w": FakeState("42", device_class="power"),
         }
-        scheduler, _ = _make_scheduler(states, self.OPTIONS)
+        scheduler, _ = make_scheduler(SCHEDULER, states, self.OPTIONS)
 
         self.assertTrue(scheduler._is_confirmed("light.sala", True, "sensor.sala_w"))
 
@@ -205,7 +108,7 @@ class PowerConfirmationTests(unittest.TestCase):
             "light.sala": FakeState("off"),
             "sensor.sala_w": FakeState("22", device_class="temperature"),
         }
-        scheduler, _ = _make_scheduler(states, self.OPTIONS)
+        scheduler, _ = make_scheduler(SCHEDULER, states, self.OPTIONS)
 
         self.assertTrue(scheduler._is_confirmed("light.sala", False, "sensor.sala_w"))
 
@@ -214,7 +117,7 @@ class PowerConfirmationTests(unittest.TestCase):
             "light.sala": FakeState("on"),
             "sensor.sala_w": FakeState("unavailable", device_class="power"),
         }
-        scheduler, _ = _make_scheduler(states, self.OPTIONS)
+        scheduler, _ = make_scheduler(SCHEDULER, states, self.OPTIONS)
 
         self.assertTrue(scheduler._is_confirmed("light.sala", True, "sensor.sala_w"))
 

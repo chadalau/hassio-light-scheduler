@@ -1,291 +1,256 @@
-# Revisão de Código: light_scheduler
+# REVIEW-qwen37.md - Revisao independente light_scheduler
 
-**Revisor:** qwen3.7-max  
-**Data:** 2026-08-16  
-**Escopo:** Integração completa `custom_components/light_scheduler/` (11 arquivos Python, 1 card JS, manifests, traduções)  
-**Status:** PRECISA DE ALTERAÇÃO
+**Revisor**: qwen3.7-max  
+**Data**: 2026-08-16  
+**Escopo**: `custom_components/light_scheduler/` (todos os arquivos) + `tests/`  
+**Status**: **PRECISA DE ALTERACAO** (2 criticos, 6 medios, 7 menores)
 
 ---
 
-## Problemas Críticos
+## Comandos executados
 
-### 1. `async_stop` durante ramp-up cancela a task mas não desliga luzes já ligadas
-**Arquivo:** `scheduler.py:445-481`
-
-**Problema:** Quando `async_stop()` é chamado enquanto `async_turn_on()` está no meio do loop de `_actuate` (linhas 427-437), o código cancela `_ramp_task` (linha 455-456):
-
-```python
-ramp_task = self._ramp_task
-current_task = asyncio.current_task()
-if ramp_task and ramp_task is not current_task and not ramp_task.done():
-    ramp_task.cancel()
-    await asyncio.gather(ramp_task, return_exceptions=True)
+```
+pytest tests/ -v
+# Resultado: 10 passed, 1 skipped (test_ignores_nonexistent_dst_time: tzdata ausente)
 ```
 
-O problema é que `async_turn_on` pode estar sendo executado **na mesma task** que chamou `async_stop` (ex: se `_async_finish` chama `async_stop` e o timer de finish dispara enquanto o ramp-up ainda está em andamento). Nesse caso, `ramp_task is current_task` é `True`, e o cancelamento não acontece. O loop de ramp-up continua, e o loop de stop (linha 463-467) só começa após o ramp-up terminar.
+## Arquivos revisados
 
-Mais grave: se `async_stop` for chamado de uma task diferente (ex: serviço `stop`), o ramp-up é cancelado via `CancelledError`, mas as luzes que já foram ligadas com sucesso (linhas 430-431) não são desligadas imediatamente. O loop de stop (linha 463-467) usa `self._run_targets`, que contém todas as luzes que estavam disponíveis no início do ramp-up, incluindo as que ainda não foram ligadas. Isso é correto, mas se uma luz foi ligada com sucesso e depois ficou indisponível, o `_actuate` vai falhar e adicionar uma warning, mas a luz pode permanecer ligada fisicamente.
-
-**Correção:** Rastrear quais luzes foram efetivamente ligadas durante o ramp-up e desligar apenas essas, ou adicionar um flag `_ramp_interrupted` que o loop de stop verifica para pular luzes que não foram ligadas.
+| Arquivo | Linhas |
+|---------|--------|
+| `const.py` | 51 |
+| `__init__.py` | 537 |
+| `scheduler.py` | 633 |
+| `sensor.py` | 245 |
+| `switch.py` | 27 |
+| `binary_sensor.py` | 33 |
+| `next_run.py` | 34 |
+| `store.py` | 43 |
+| `schedules.py` | 39 |
+| `config_flow.py` | 247 |
+| `power.py` | 37 |
+| `frontend/light-schedule-card.js` | 1303 |
+| `manifest.json` | 13 |
+| `services.yaml` | 153 |
+| `strings.json` | 59 |
+| `translations/en.json` | 59 |
+| `translations/pt-BR.json` | 59 |
+| `tests/test_next_run.py` | 70 |
+| `tests/test_confirmation.py` | 223 |
 
 ---
 
-### 2. Timezone/DST: `find_next_run` não lida com horários ambíguos
-**Arquivo:** `next_run.py:19-34`
+## Problemas por severidade
 
-**Problema:** A função `_exists` (linhas 14-17) verifica se um horário local existe após conversão UTC→local→UTC, mas **não lida corretamente com horários ambíguos durante transições de DST**. Se um horário cair no "overlap" de DST (ex: 1:30 AM que ocorre duas vezes), `_exists` retorna `True`, mas o código não especifica qual das duas ocorrências usar. O `datetime.combine` usa `fold=0` por padrão, o que pode agendar a primeira ocorrência (ainda no horário de verão) quando o usuário esperava a segunda (horário normal).
+### CRITICO
+
+#### C1. `add_schedule` permite IDs duplicados, corrompendo operacoes subsequentes
+
+**Arquivo**: `__init__.py:339-349`
 
 ```python
-# next_run.py:30
+async def add(call: ServiceCall) -> None:
+    schedule = _validated_schedule(_service_data(call))
+    for scheduler in await _resolve(hass, call):
+        options = {
+            **scheduler.options,
+            CONF_SCHEDULES: [
+                *scheduler.options.get(CONF_SCHEDULES, []),
+                schedule,
+            ],
+        }
+        await _update_options(hass, scheduler, options)
+```
+
+O `new_schedule` (em `schedules.py:38`) preserva um `id` fornecido pelo usuario: `result[CONF_SCHEDULE_ID] = result.get(CONF_SCHEDULE_ID) or uuid4().hex`. Se o caller passar um `id` que ja existe, dois schedules com o mesmo ID sao criados. As operacoes `update_schedule` e `remove_schedule` usam busca linear com `next(...)` implicito (`for schedule in ...: if schedule.get(CONF_SCHEDULE_ID) == schedule_id`), o que significa que o segundo schedule com o mesmo ID torna-se invisivel para edicao e impossivel de remover individualmente.
+
+**Cenario**: card ou automacao chama `add_schedule` com `id: "meu_id"` duas vezes. O `update_schedule` com `id: "meu_id"` sempre edita o primeiro. O `remove_schedule` remove o primeiro, deixando o segundo como "fantasma" com o mesmo ID.
+
+**Correcao**: Antes de adicionar, verificar se ja existe um schedule com o mesmo ID e lancar `ServiceValidationError`:
+
+```python
+existing_ids = {s.get(CONF_SCHEDULE_ID) for s in scheduler.options.get(CONF_SCHEDULES, [])}
+if schedule.get(CONF_SCHEDULE_ID) in existing_ids:
+    raise ServiceValidationError(f"ID duplicado: {schedule[CONF_SCHEDULE_ID]}")
+```
+
+---
+
+#### C2. `update_schedule` e `remove_schedule` aplicam parcialmente em multiplas zonas
+
+**Arquivo**: `__init__.py:408-429` (update) e `351-371` (remove)
+
+```python
+for scheduler in await _resolve(hass, call):
+    schedules: list[dict[str, Any]] = []
+    matched = False
+    for schedule in scheduler.options.get(CONF_SCHEDULES, []):
+        if schedule.get(CONF_SCHEDULE_ID) == schedule_id:
+            schedules.append(_validated_schedule({...}))
+            matched = True
+        else:
+            schedules.append(schedule)
+    if not matched:
+        raise ServiceValidationError(f"Agendamento desconhecido: {schedule_id}")
+    await _update_options(hass, scheduler, {...})
+```
+
+Quando `_resolve` retorna multiplos schedulers (ex: `entity_id` apontando para entidades de duas zonas), o loop itera sobre cada um. Se o `schedule_id` existe na primeira zona mas nao na segunda, a primeira ja foi persistida via `_update_options` quando a segunda lanca `ServiceValidationError`. O resultado e uma atualizacao parcial: a primeira zona foi modificada, a segunda nao, e o caller recebe um erro.
+
+O mesmo padrao se aplica a `remove_schedule` (linha 351-371).
+
+**Correcao**: Validar que TODOS os schedulers contem o `schedule_id` ANTES de aplicar qualquer mudanca:
+
+```python
+schedulers = await _resolve(hass, call)
+for scheduler in schedulers:
+    if not any(s.get(CONF_SCHEDULE_ID) == schedule_id for s in scheduler.options.get(CONF_SCHEDULES, [])):
+        raise ServiceValidationError(f"Agendamento desconhecido: {schedule_id} em {scheduler.entry.title}")
+for scheduler in schedulers:
+    # aplicar mudanca
+```
+
+---
+
+### MEDIO
+
+#### M1. Horario ambiguo no DST (fold) dispara sempre na primeira ocorrencia
+
+**Arquivo**: `next_run.py:30`
+
+```python
 candidate = datetime.combine(date, schedule_time, tzinfo=now.tzinfo)
 ```
 
-Mais grave: se o horário cair exatamente no "gap" de DST (ex: 2:30 AM que não existe), `_exists` retorna `False` e o agendamento é pulado silenciosamente. O usuário não é notificado, e a luz não liga nesse dia.
+`datetime.combine` cria o datetime com `fold=0` por padrao. Em um dia de transicao DST onde o relogio volta (ex: 03:00 -> 02:00), o horario 02:30 existe duas vezes: uma antes do relogio voltar (fold=0, UTC mais tarde) e uma depois (fold=1, UTC mais cedo). O `_exists` (linha 14-17) retorna True para ambos os folds, mas o `combine` sempre produz fold=0.
 
-**Correção:** Usar `fold=1` para preferir a segunda ocorrência (mais conservador, evita ligar luzes cedo demais). Alternativamente, notificar o usuário quando um agendamento for pulado devido a DST, ou ajustar automaticamente para o horário mais próximo que existe.
+**Cenario**: Usuario agenda para 02:30 em um dia de fall-back. O agendamento dispara na primeira ocorrencia de 02:30 (antes do relogio voltar), que e ~1h antes do que o usuario pode esperar.
 
----
-
-### 3. `_schedule_next` pode agendar início no passado sob carga
-**Arquivo:** `scheduler.py:259-283`
-
-**Problema:** A função `find_next_run` retorna um horário futuro, mas entre o retorno e o agendamento do timer (linha 280-282), o horário pode já ter passado (ex: se o sistema estiver sob carga e o event loop estiver atrasado). O `async_track_point_in_time` do HA lida com isso executando imediatamente, mas isso pode causar comportamento inesperado se o scheduler estiver no meio de um unload.
+**Correcao**: Documentar o comportamento ou, idealmente, gerar dois candidates (fold=0 e fold=1) e escolher o primeiro que ainda nao passou:
 
 ```python
-# scheduler.py:280-282
-self._unsub_next = async_track_point_in_time(
-    self.hass, scheduled_start, upcoming
-)
-```
-
-O callback `scheduled_start` (linhas 275-278) verifica `generation != self._schedule_generation`, mas não verifica `self._unloading`. Se o unload começar após o timer ser agendado mas antes de disparar, o callback pode executar e tentar iniciar uma execução em um scheduler que está sendo descarregado.
-
-**Correção:** Verificar `self._unloading` dentro de `scheduled_start` antes de executar:
-```python
-async def scheduled_start(_: datetime) -> None:
-    if generation != self._schedule_generation or self._unloading:
-        return
-    await self._async_scheduled_start(upcoming, schedule)
+for fold in (0, 1):
+    candidate = datetime.combine(date, schedule_time, tzinfo=now.tzinfo, fold=fold)
+    ...
 ```
 
 ---
 
-### 4. Validação insuficiente em `set_zone_options` permite perda de pareamentos
-**Arquivo:** `__init__.py:417-496`
+#### M2. `_async_scheduled_start` estende duracao mas nao atualiza targets
 
-**Problema:** O serviço `set_zone_options` aceita `entity_mappings` e o substitui completamente (linhas 436-446). Se o card enviar mappings incompletos (ex: sem `power_entity_id` para algumas luzes), os pareamentos existentes são perdidos. O código não faz merge com mappings anteriores.
-
-```python
-# __init__.py:436-446
-if CONF_ENTITY_MAPPINGS in data:
-    mappings = _normalize_mappings(hass, data[CONF_ENTITY_MAPPINGS])
-    options[CONF_ENTITY_MAPPINGS] = mappings
-    options[CONF_TARGET_ENTITY_IDS] = [
-        item["target_entity_id"] for item in mappings
-    ]
-    options[CONF_POWER_ENTITY_IDS] = [
-        item["power_entity_id"]
-        for item in mappings
-        if item["power_entity_id"]
-    ]
-```
-
-O card envia todos os mappings via `_saveZone` (light-schedule-card.js:572-603), mas se um sensor de potência ficou indisponível e não foi retornado pelo `_entityChoices` do card (linha 340-373), ele será omitido e o pareamento perdido. O `_entityChoices` filtra por `device_class` e `unit_of_measurement`, não por disponibilidade, então sensores indisponíveis ainda aparecem. Mas se um sensor foi removido do HA (não apenas indisponível), ele não aparecerá, e o pareamento será perdido.
-
-**Correção:** Fazer merge com mappings existentes, preservando `power_entity_id` quando não fornecido explicitamente:
-```python
-if CONF_ENTITY_MAPPINGS in data:
-    new_mappings = _normalize_mappings(hass, data[CONF_ENTITY_MAPPINGS])
-    existing = {
-        item["target_entity_id"]: item
-        for item in scheduler.entity_mappings
-    }
-    merged = []
-    for new in new_mappings:
-        target = new["target_entity_id"]
-        if not new["power_entity_id"] and target in existing:
-            new["power_entity_id"] = existing[target].get("power_entity_id", "")
-        merged.append(new)
-    options[CONF_ENTITY_MAPPINGS] = merged
-```
-
----
-
-### 5. Cache de power mapping não é invalidado quando opções mudam
-**Arquivo:** `sensor.py:52-123`
-
-**Problema:** O método `_power_mapping` cacheia o resultado em `self._cached_power_mapping` (linha 122). O cache é invalidado em `_handle_update` (linha 200), que é chamado via dispatcher quando o scheduler envia `_notify()`. Mas **não é invalidado quando as opções do config entry mudam** via options flow. Se o usuário editar os mappings via options flow, o scheduler chama `async_options_updated` (scheduler.py:526-531), que chama `_schedule_next()`, que chama `_notify()`. Então o cache deveria ser invalidado. Mas se o dispatcher signal for enviado antes de o sensor ser atualizado, o cache pode ficar desatualizado.
+**Arquivo**: `scheduler.py:299-310`
 
 ```python
-# sensor.py:60-61
-if self._cached_power_mapping is not None:
-    return dict(self._cached_power_mapping)
-```
-
-**Correção:** Invalidar o cache explicitamente em `async_options_updated` ou assinar mudanças de options diretamente no sensor.
-
----
-
-## Problemas Médios
-
-### 6. Confirmação de atuação pode falhar silenciosamente
-**Arquivo:** `scheduler.py:357-384`
-
-**Problema:** O método `_actuate` tenta confirmar se a luz mudou de estado físico (via estado HA + sensor de potência), mas se a confirmação falhar após 2 tentativas, apenas loga um warning (linha 380-383) e retorna `False`. O chamador (`async_turn_on` ou `async_stop`) adiciona a entidade a `_run_warnings`, mas **não interrompe a execução**.
-
-Isso significa que se uma luz não responder, o scheduler continua tentando ligar/desligar as outras, o que é correto, mas o usuário não é notificado em tempo real. As warnings só aparecem no `binary_sensor.active` após o fim da execução.
-
-```python
-# scheduler.py:430-432
-if not await self._actuate(entity_id, "turn_on", True):
-    self._run_warnings.append(entity_id)
-    self._notify()
-```
-
-**Correção:** Expor `_run_warnings` via dispatcher imediatamente (o código já chama `_notify()`, então isso deveria funcionar, mas o card não mostra warnings em tempo real). Adicionar um evento HA quando uma atuação falhar, ou mostrar warnings no card durante a execução.
-
----
-
-### 7. `_reconcile_active_run_edit` não lida com schedule deletado
-**Arquivo:** `scheduler.py:533-563`
-
-**Problema:** Se o usuário deletar o schedule que está atualmente em execução, `_reconcile_active_run_edit` não encontra o schedule (linha 544-550) e retorna sem fazer nada. A execução continua com o `finishes_at` original, o que é correto, mas o `_run_schedule_id` fica órfão.
-
-```python
-# scheduler.py:544-550
-schedule = next(
-    (
-        item for item in self.options.get(CONF_SCHEDULES, [])
-        if item.get(CONF_SCHEDULE_ID) == self._run_schedule_id
-    ),
-    None,
-)
-if schedule is None:
+if self._active:
+    candidate_finish = dt_util.as_utc(scheduled_at) + timedelta(
+        seconds=int(schedule[CONF_SCHEDULE_DURATION])
+    )
+    if not self._stopping and (
+        self._finishes_at is None or candidate_finish > self._finishes_at
+    ):
+        self._finishes_at = candidate_finish
+        self._arm_finish_timer()
+        await self._save_runtime(immediate=True)
+    self._schedule_next()
     return
 ```
 
-**Correção:** Limpar `_run_schedule_id` quando o schedule não for encontrado, para evitar confusão em logs/telemetria:
+Quando um segundo agendamento dispara enquanto um run esta ativo, o finish time e estendido, mas `_run_targets` nao e atualizado. Se o segundo agendamento tem `target_entity_ids` diferente (ex: inclui uma luz que nao estava no primeiro agendamento), essa luz adicional nunca e ligada. O run original continua com suas targets originais, e o `_async_stop_sequence` desliga apenas as targets originais.
+
+**Cenario**: Agendamento A (18:00, luzes X+Y) inicia um run. Agendamento B (19:00, luzes X+Y+Z) dispara durante o run. O finish time e estendido, mas Z nunca e ligada.
+
+**Correcao**: Adicionar as novas targets ao `_run_targets` e despachar `turn_on` para elas:
+
 ```python
-if schedule is None:
-    self._run_schedule_id = None
-    return
+new_targets = set(schedule.get(CONF_TARGET_ENTITY_IDS) or self.target_entity_ids) - set(self._run_targets)
+for entity_id in new_targets:
+    await self._dispatch(entity_id, "turn_on")
+    self._run_targets.append(entity_id)
 ```
 
 ---
 
-### 8. Card JS: autocomplete não fecha ao clicar fora do dialog
-**Arquivo:** `frontend/light-schedule-card.js:623-627`
+#### M3. `_on_light_changed` ignora mudancas durante run ativo, corrompendo historico externo
 
-**Problema:** O handler `_handleFocusOut` fecha o autocomplete apenas se o `relatedTarget` não estiver dentro do autocomplete. Mas se o usuário clicar fora do dialog (ex: no backdrop), o `relatedTarget` é `null`, e o autocomplete não fecha.
-
-```javascript
-// light-schedule-card.js:623-627
-_handleFocusOut(event) {
-  const autocomplete = event.target.closest?.("[data-autocomplete]");
-  if (!autocomplete || autocomplete.contains(event.relatedTarget)) return;
-  this._closeAutocomplete(autocomplete);
-}
-```
-
-**Correção:** Fechar o autocomplete se `relatedTarget` for `null` ou não estiver dentro do autocomplete:
-```javascript
-if (!autocomplete || (event.relatedTarget && autocomplete.contains(event.relatedTarget))) return;
-```
-
----
-
-### 9. Card JS: `_durationBetween` retorna 86400 quando start == end
-**Arquivo:** `frontend/light-schedule-card.js:729-734`
-
-**Problema:** Se o usuário definir start e end iguais (ex: 18:00 → 18:00), a função retorna 86400 (24 horas) devido ao `|| 86400` no final. Isso pode ser intencional (interpretar como "ligado por 24h"), mas não é documentado e pode confundir o usuário.
-
-```javascript
-// light-schedule-card.js:733
-return (endSeconds - startSeconds + 86400) % 86400 || 86400;
-```
-
-**Correção:** Adicionar validação no `_saveSchedule` para rejeitar durações de 24h ou mostrar um aviso:
-```javascript
-if (data.duration >= 86400) {
-  this._showDialogError("Duração não pode ser 24 horas ou mais.");
-  return;
-}
-```
-
----
-
-### 10. `_save_runtime` pode ser chamado após unload
-**Arquivo:** `scheduler.py:502-518`
-
-**Problema:** Se `_save_runtime` for chamado após `async_unload` (ex: em uma task de background que não foi cancelada a tempo), o store pode estar em estado inconsistente. O código não verifica `self._unloading`.
+**Arquivo**: `scheduler.py:210-212`
 
 ```python
-# scheduler.py:513-517
-await self.store.async_set(
-    self.entry.entry_id,
-    {"history": self._history, "active_run": active_run},
-    immediate=immediate,
-)
-```
-
-**Correção:** Retornar early se `self._unloading` for `True`:
-```python
-async def _save_runtime(self, *, immediate: bool = False) -> None:
-    if self._unloading:
-        return
-    # ...
-```
-
----
-
-### 11. `_on_light_changed` registra eventos externos mesmo quando scheduler está ativo
-**Arquivo:** `scheduler.py:208-221`
-
-**Problema:** O callback retorna early se `self._active` (linha 210-211), mas se o scheduler estiver no meio de um `async_stop` (ou seja, `_stopping` é `True` mas `_active` ainda é `True`), eventos de luz não são registrados. Isso pode perder transições externas durante o desligamento.
-
-```python
-# scheduler.py:209-211
 @callback
 def _on_light_changed(self, event: Event) -> None:
     if self._active:
         return
 ```
 
-**Correção:** Registrar eventos externos mesmo durante `_stopping`, ou documentar que eventos durante desligamento são ignorados. Alternativamente, verificar `self._active and not self._stopping`.
+Se uma luz e ligada manualmente ANTES de um run comecar, `_record_external` abre um registro com `source=SOURCE_EXTERNAL`. Quando o run comeca, `_active` torna-se True e mudancas subsequentes sao ignoradas. Quando o run termina, `_active` volta a False. Se a luz desliga depois, `_record_external` fecha o registro externo, mas a duracao calculada inclui todo o tempo do run.
+
+**Cenario**: Luz ligada manualmente as 18:00. Run do agendamento comeca as 18:30 (duracao 1h). Run termina as 19:30. Luz desliga manualmente as 20:00. O historico externo mostra duracao de 2h (18:00-20:00) em vez de 1h30 (18:00-18:30 + 19:30-20:00).
+
+**Correcao**: Ao iniciar um run, fechar quaisquer registros externos abertos para as targets do run. Ao terminar, reabrir se a luz ainda esta on.
 
 ---
 
-## Problemas Menores
+#### M4. `_restore_active_run` usa targets que podem ter sido removidos da configuracao
 
-### 12. `_normalize_mappings` não valida se target existe
-**Arquivo:** `__init__.py:96-140`
-
-**Problema:** A função valida o formato de `target_entity_id` (linha 111-114) mas não verifica se a entidade existe no HA. Se o usuário enviar uma entidade inexistente, ela será aceita e apenas falhará durante a atuação.
+**Arquivo**: `scheduler.py:190-195`
 
 ```python
-# __init__.py:111-114
-if not target.startswith(("light.", "switch.")):
-    raise ServiceValidationError(
-        "Cada entrada precisa de uma entidade light ou switch."
+stored_targets = value.get("targets")
+self._run_targets = (
+    [str(entity_id) for entity_id in stored_targets]
+    if isinstance(stored_targets, list)
+    else list(self.target_entity_ids)
+)
+```
+
+Se o HA reinicia e uma entidade que fazia parte do run ativo foi removida da configuracao (via options flow ou edicao direta), os `_run_targets` restaurados incluem a entidade removida. O `_async_stop_sequence` tenta desligar todas as targets, incluindo a inexistente. O `_dispatch` captura a excecao, mas o `_confirm_group` espera `ACTUATION_GRACE` (15s) por uma entidade que nunca vai responder, atrasando o stop em ate 30s (grace + retry).
+
+**Correcao**: Filtrar `_run_targets` contra `self.target_entity_ids` na restauracao:
+
+```python
+self._run_targets = [
+    eid for eid in stored_targets
+    if eid in self.target_entity_ids
+] or list(self.target_entity_ids)
+```
+
+---
+
+#### M5. `serialize_schedule` perde segundos do campo `time`
+
+**Arquivo**: `schedules.py:19-21`
+
+```python
+value = result.get(CONF_SCHEDULE_TIME)
+if isinstance(value, time):
+    result[CONF_SCHEDULE_TIME] = value.strftime("%H:%M")
+```
+
+O `cv.time` do HA aceita "HH:MM:SS" e produz um `datetime.time` com segundos. O `strftime("%H:%M")` descarta os segundos. Se um usuario ou automacao criar um agendamento com `time: "18:30:45"`, os segundos sao silenciosamente perdidos.
+
+**Correcao**: Usar `value.strftime("%H:%M:%S")` se segundos forem relevantes, ou `value.isoformat()` que preserva todos os componentes.
+
+---
+
+#### M6. `_prune_history` preserva indefinidamente registros com `started_at` invalido
+
+**Arquivo**: `scheduler.py:551-564`
+
+```python
+for item in self._history:
+    raw_started = item.get("started_at")
+    started = (
+        dt_util.parse_datetime(raw_started)
+        if isinstance(raw_started, str)
+        else None
     )
+    if not started or dt_util.as_utc(started) >= cutoff:
+        retained.append(item)
 ```
 
-**Correção:** Verificar `hass.states.get(target)` e rejeitar entidades inexistentes, ou aceitar entidades inexistentes mas logar um warning.
+Registros com `started_at` corrompido (None, string invalida, ou nao-string) sao mantidos para sempre, pois `not started` e True. Com o tempo, esses registros zombie ocupam espaco no store e contam contra o `HISTORY_MAX_ENTRIES` (200), efetivamente reduzindo o historico util.
 
----
+**Correcao**: Remover registros com `started_at` invalido:
 
-### 13. `_prune_history` pode reter registros inválidos
-**Arquivo:** `scheduler.py:487-500`
-
-**Problema:** Se `started_at` não for parseável (linha 493-497), o registro é retido (linha 498-499). Isso pode acumular registros corrompidos ao longo do tempo.
-
-```python
-# scheduler.py:498-499
-if not started or dt_util.as_utc(started) >= cutoff:
-    retained.append(item)
-```
-
-**Correção:** Descartar registros com `started_at` inválido:
 ```python
 if started and dt_util.as_utc(started) >= cutoff:
     retained.append(item)
@@ -293,154 +258,168 @@ if started and dt_util.as_utc(started) >= cutoff:
 
 ---
 
-### 14. Card JS: `_formatDays` assume ordem dos dias
-**Arquivo:** `frontend/light-schedule-card.js:859-865`
+### MENOR
 
-**Problema:** A função ordena os dias (linha 860), mas se o backend enviar dias fora de ordem, a exibição pode ser confusa. Além disso, a verificação de "seg–sex" (linha 862) assume que os dias são exatamente `[0,1,2,3,4]`, o que é correto, mas frágil.
+#### m1. `async_turn_on` nao verifica `_unloading`, permitindo ligar luzes durante unload
 
-```javascript
-// light-schedule-card.js:862
-if (list.length === 5 && list.every((value, index) => value === index)) return "seg–sex";
-```
-
-**Correção:** Usar uma verificação mais explícita:
-```javascript
-if (list.length === 5 && list.slice(0, 5).every((v, i) => v === i)) return "seg–sex";
-```
-
----
-
-### 15. `services.yaml` não documenta `entry_id` como alternativa a `target`
-**Arquivo:** `services.yaml:1-116`
-
-**Problema:** Todos os serviços aceitam `entry_id` como parâmetro (via `_resolve` em `__init__.py:245-293`), mas isso não está documentado em `services.yaml`. O card usa `entry_id` internamente, mas usuários que chamam serviços via automação podem não saber disso.
-
-**Correção:** Adicionar campo `entry_id` em todos os serviços no `services.yaml`:
-```yaml
-fields:
-  entry_id:
-    name: Entry ID
-    description: ID da zona (alternativa a target)
-    selector:
-      text: {}
-```
-
----
-
-### 16. Card JS: `_entityChoices` filtra incorretamente entidades do scheduler
-**Arquivo:** `frontend/light-schedule-card.js:340-373`
-
-**Problema:** O filtro de `schedulerEntryIds` (linhas 342-346) inclui qualquer estado com `attributes.lights` e `attributes.entry_id`, mas outras integrações podem ter atributos similares. Isso pode filtrar incorretamente entidades não relacionadas.
-
-```javascript
-// light-schedule-card.js:342-346
-const schedulerEntryIds = new Set(
-  states
-    .filter((state) => Array.isArray(state.attributes?.lights) && state.attributes?.entry_id)
-    .map((state) => state.attributes.entry_id)
-);
-```
-
-**Correção:** Verificar também se `entity_id` começa com `sensor.light_scheduler` ou se `attributes.entry_id` corresponde a um config entry do domínio `light_scheduler`:
-```javascript
-const schedulerEntryIds = new Set(
-  states
-    .filter((state) => 
-      state.entity_id.startsWith("sensor.light_scheduler") &&
-      Array.isArray(state.attributes?.lights) && 
-      state.attributes?.entry_id
-    )
-    .map((state) => state.attributes.entry_id)
-);
-```
-
----
-
-### 17. `power.py` não lida com unidades não padrão
-**Arquivo:** `power.py:7-28`
-
-**Problema:** O dicionário `POWER_UNITS` (linha 7) suporta apenas "W" e "kW". Se um sensor usar "watt" ou "kilowatt" (por extenso), o valor não será convertido corretamente.
+**Arquivo**: `scheduler.py:405-421`
 
 ```python
-# power.py:7
-POWER_UNITS = {"W": 1.0, "kW": 1000.0}
+async def async_turn_on(self, ...):
+    if self._active:
+        return
+    ...
+    self._active, self._source = True, source
 ```
 
-**Correção:** Adicionar variações comuns:
+Se um timer de `async_track_point_in_time` dispara na janela entre o inicio do `async_unload` e o cancelamento do listener (`_unsub_next()`), o `scheduled_start` pode executar. O `_schedule_generation` nao e incrementado no unload (apenas no `_schedule_next`), entao o check de geracao passa. O `async_turn_on` nao verifica `_unloading` e prossegue com o dispatch.
+
+Na pratica, o cancelamento do `TimerHandle` e sincrono e a janela e minima, mas o check defensivo custa nada:
+
 ```python
-POWER_UNITS = {"W": 1.0, "kW": 1000.0, "watt": 1.0, "kilowatt": 1000.0}
+if self._active or self._unloading:
+    return
 ```
 
 ---
 
-### 18. `manifest.json` não especifica `homeassistant` version mínima
-**Arquivo:** `manifest.json:1-13`
+#### m2. `_dispatch` captura `Exception` mas nao `BaseException` (CancelledError)
 
-**Problema:** O manifesto não inclui `"homeassistant": "2024.X.X"` para especificar a versão mínima do HA. Isso pode causar falhas de instalação em versões antigas que não suportam APIs usadas (ex: `async_register_static_paths`, `runtime_data`).
+**Arquivo**: `scheduler.py:350-359`
 
-**Correção:** Adicionar:
-```json
-"homeassistant": "2024.6.0"
+```python
+async def _dispatch(self, entity_id: str, service: str) -> None:
+    try:
+        await self.hass.services.async_call(
+            "homeassistant", service, {"entity_id": entity_id}, blocking=True
+        )
+    except Exception:
+        _LOGGER.exception(...)
 ```
 
----
-
-### 19. `_schedule_generation` não é persistido
-**Arquivo:** `scheduler.py:50`
-
-**Problema:** O `_schedule_generation` é inicializado como 0 e incrementado a cada chamada de `_schedule_next`. Se o scheduler for descarregado e recarregado, o contador reinicia, e timers agendados anteriormente (se persistidos) podem ser executados incorretamente. Mas como os timers não são persistidos, isso não é um problema na prática.
-
-**Correção:** Nenhum, apenas documentar que `_schedule_generation` é volátil.
+Em Python 3.8+, `CancelledError` e subclasse de `BaseException`, nao de `Exception`. Se o task e cancelado durante o `_dispatch`, o `CancelledError` propaga sem ser logado. Isso e tecnicamente correto (cancelamento nao e erro), mas o `_LOGGER.exception` sugere que a intencao era capturar tudo. O comportamento atual e aceitavel, mas o comentario "Home Assistant reports the failing entity" e enganoso.
 
 ---
 
-### 20. `_background_tasks` pode acumular tasks completadas
-**Arquivo:** `scheduler.py:51, 203-206`
+#### m3. `async_delay_save` pode perder dados em desligamento abrupto
 
-**Problema:** O código usa `task.add_done_callback(self._background_tasks.discard)` (linha 206) para remover tasks completadas. Isso é correto, mas se uma task levantar uma exceção não tratada, ela pode permanecer no set até ser descartada. O `async_unload` cancela e aguarda todas as tasks (linhas 158-161), então não há vazamento.
+**Arquivo**: `store.py:42-43`
 
-**Correção:** Nenhum, o código está correto.
+```python
+else:
+    self._store.async_delay_save(lambda: self._data or {}, 2)
+```
 
----
-
-## Falsos Positivos Percebidos
-
-1. **Perda de `enabled` no options flow:** O spread `{**self.config_entry.options, ...}` preserva `CONF_ENABLED` se ele já estiver em options. Como `CONF_ENABLED` é sempre adicionado na criação (config_flow.py:150-162), o problema é muito improvável na prática.
-
-2. **Vazamento de listeners de dispatcher:** Os listeners são registrados via `async_on_remove`, que é chamado quando a entidade é removida. Se `async_unload_entry` descarrega as plataformas (linha 198), as entidades são removidas e os listeners são cancelados. A ordem é: primeiro scheduler.async_unload() (linha 197), depois async_unload_platforms (linha 198). Entre esses dois passos, os listeners de dispatcher ainda estão ativos, mas o scheduler já foi descarregado. Se um dispatcher signal for enviado nesse intervalo, os callbacks tentarão acessar o scheduler, que ainda existe (não é destruído), então não há crash.
-
-3. **`_schedule_generation` parece desnecessário:** Na verdade, é usado para invalidar timers agendados quando as opções mudam (linha 276-277). Não é um bug.
-
-4. **`async_delay_save` pode parecer perda de dados:** O store usa `async_delay_save` com 2 segundos (linha 31), mas chamadas críticas usam `immediate=True` (ex: linha 419, 479), então dados importantes são persistidos imediatamente.
+Mudancas nao-imediatas sao salvas com delay de 2 segundos. Se o HA desliga abruptamente (crash, power loss) nesse intervalo, os dados sao perdidos. Os pontos criticos (inicio/fim de run) usam `immediate=True`, mas registros de historico externo (`_record_external`) usam `immediate=False`. Um ciclo rapido de liga/desliga manual pode perder o registro.
 
 ---
 
-## Comandos Executados
+#### m4. Card JS: `_state` getter faz busca linear em todos os estados do HA
 
-Nenhum comando de teste foi executado, pois a revisão é estática e não há ambiente HA disponível.
+**Arquivo**: `light-schedule-card.js:63-76`
+
+```javascript
+get _state() {
+    const configured = this._hass?.states?.[this._config?.entity];
+    if (!configured || Array.isArray(configured.attributes?.lights)) {
+        return configured;
+    }
+    const entryId = configured.attributes?.entry_id;
+    if (!entryId) return configured;
+    return Object.values(this._hass.states).find(
+        (state) => state.attributes?.entry_id === entryId && Array.isArray(state.attributes?.lights)
+    ) || configured;
+}
+```
+
+Se o usuario configurar o card com a entidade `switch.schedule_enabled` ou `binary_sensor.active` (que nao tem `lights`), o fallback faz `Object.values(this._hass.states).find(...)`, que e O(n) sobre todos os estados do HA. Em instalacoes com centenas de entidades, isso e chamado a cada atualizacao de estado.
 
 ---
 
-## Sugestões Adicionais
+#### m5. Card JS: `_durationBetween` retorna 86400 quando start == end
 
-1. **Adicionar testes unitários** para `find_next_run` com cenários de DST.
-2. **Implementar retry exponencial** em `_actuate` em vez de apenas 2 tentativas.
-3. **Expor `warnings` via evento HA** para permitir automações que reajam a falhas de atuação.
-4. **Adicionar diagnóstico** no card para mostrar quando uma luz não confirmou atuação.
-5. **Considerar usar `async_track_state_change_filtered`** em vez de `async_track_state_change_event` para reduzir overhead.
-6. **Adicionar logs estruturados** (ex: `structlog`) para facilitar debugging em produção.
-7. **Implementar health check** no card para mostrar se o scheduler está funcionando corretamente.
+**Arquivo**: `light-schedule-card.js:906-911`
+
+```javascript
+_durationBetween(start, end) {
+    const startSeconds = this._timeToSeconds(start);
+    const endSeconds = this._timeToSeconds(end);
+    if (startSeconds == null || endSeconds == null) return 0;
+    return (endSeconds - startSeconds + 86400) % 86400 || 86400;
+}
+```
+
+Quando start e end sao iguais, `(0 + 86400) % 86400 = 0`, e `0 || 86400 = 86400`. O resultado e 24h. O backend aceita (max e 86400), mas o usuario pode nao perceber que start==end significa "24 horas". O preview mostra "24h" mas nao ha aviso explicito.
+
+---
+
+#### m6. Card JS: `_formatNext` usa timezone do browser quando `hass.config.time_zone` nao esta disponivel
+
+**Arquivo**: `light-schedule-card.js:1021-1024`
+
+```javascript
+const timeZone = this._hass?.config?.time_zone;
+const dateKey = (value) => value.toLocaleDateString("en-CA", { timeZone, ... });
+const prefix = dateKey(date) === dateKey(now) ? "hoje" : ...;
+```
+
+Se `this._hass.config` ainda nao foi carregado (startup), `timeZone` e `undefined`, e `toLocaleDateString` usa a timezone do browser. Se o browser esta em uma timezone diferente do HA, "hoje" e "amanha" podem estar errados.
+
+---
+
+#### m7. `_power_mapping` cache nao e invalidado quando `device_class` de um sensor muda
+
+**Arquivo**: `sensor.py:221-227`
+
+```python
+@callback
+def _handle_watched_state(self, event: Any) -> None:
+    if event.data.get("new_state") is None:
+        self._cached_power_mapping = None
+        self._refresh_state_listener()
+    self.async_write_ha_state()
+```
+
+O cache so e invalidado quando `new_state is None` (entidade removida). Se o `device_class` de um sensor muda (ex: de `temperature` para `power` apos reconfiguracao), o cache continua com o mapeamento antigo. Edge case improvavel mas possivel.
+
+---
+
+## Falsos positivos percebidos
+
+1. **`_stopping` limpo duas vezes** (`scheduler.py:506` e `537`): O `_stopping = False` aparece no corpo de `_async_stop_sequence` e no `finally` de `async_stop`. Parece redundante, mas o `finally` garante limpeza mesmo se `_async_stop_sequence` lancar excecao. Nao e bug.
+
+2. **`_register_services` chamado em `async_setup` e `async_setup_entry`**: O guard `hass.services.has_service` previne registro duplicado. O padrao e correto e necessario para o caso de `async_setup` nao ser chamado antes de `async_setup_entry` (config_entry_only).
+
+3. **`_resolve` com `entry.runtime_data not in found`**: A verificacao de duplicatas usa `not in` com comparacao por identidade. Como `runtime_data` e uma instancia unica por entry, isso funciona corretamente.
+
+4. **`_build_mappings` com power vazio**: O mapeamento posicional com fallback e intencional e documentado. Sensores de potencia sao opcionais.
+
+5. **`_dispatch` com `blocking=True`**: O blocking e necessario para garantir que o servico foi executado antes da confirmacao. O timeout e herdado do HA (padrao generoso).
+
+6. **Options flow preserva `CONF_SCHEDULES` e `CONF_ENABLED`**: O spread `**self.config_entry.options` no `config_flow.py:216` preserva todos os campos nao editados pelo form. Nao ha perda de dados.
+
+---
+
+## Sugestoes (nao sao bugs)
+
+1. **Teste de DST ambiguo**: O teste `test_ignores_nonexistent_dst_time` esta skipado por falta de tzdata. Considere adicionar `tzdata` como dependencia de teste ou usar `zoneinfo` com fallback.
+
+2. **Cobertura de testes**: Os testes cobrem `next_run` e `confirmation`, mas nao cobrem `config_flow`, `store`, `schedules`, `power`, ou o card JS. Adicionar testes para `_normalize_mappings`, `_build_mappings`, e `_durationBetween` preveniria regressoes.
+
+3. **`_notify` excessivo**: O `_notify` e chamado em muitos pontos (`_schedule_next`, `_save_runtime`, `_async_stop_sequence`, `_on_light_changed`). Considere debouncing para evitar atualizacoes excessivas do card em zonas com muitas luzes.
+
+4. **Card JS**: O `_render` reconstroi todo o DOM a cada mudanca. Para zonas com muitas luzes, considere atualizacao incremental (diffing) para evitar flicker e perda de foco em inputs.
 
 ---
 
 ## Resumo
 
-A integração é bem estruturada e lida corretamente com a maioria dos cenários. Os problemas críticos identificados são:
+| Severidade | Count | IDs |
+|-----------|-------|-----|
+| Critico | 2 | C1, C2 |
+| Medio | 6 | M1, M2, M3, M4, M5, M6 |
+| Menor | 7 | m1, m2, m3, m4, m5, m6, m7 |
 
-1. Corrida entre turn_on/turn_off pode deixar luzes ligadas (raro, mas possível)
-2. Timezone/DST não lida com horários ambíguos (afeta usuários em regiões com DST)
-3. `_schedule_next` pode agendar início no passado sob carga (raro)
-4. Perda de pareamentos de potência no card (quando sensores são removidos)
-5. Cache de power mapping não é invalidado quando opções mudam (timing issue)
+**Status**: **PRECISA DE ALTERACAO**
 
-Recomenda-se corrigir os problemas críticos antes do próximo release, especialmente #1 e #2, que podem afetar a experiência do usuário.
+Os dois problemas criticos (C1 e C2) sao bugs concretos e reproduziveis que podem corromper o estado da integracao. Os problemas medios (M1-M6) sao edge cases reais com impacto funcional verificavel. Os menores (m1-m7) sao melhorias defensivas e de performance.

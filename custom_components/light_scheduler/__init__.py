@@ -153,6 +153,65 @@ def _normalize_mappings(
     return result
 
 
+def _assert_targets_in_zone(
+    scheduler: LightScheduler, schedule: dict[str, Any]
+) -> None:
+    """Reject a schedule that selects lights the zone does not control.
+
+    The schema only checks the domain. Without this, a call could persist an
+    entity from another zone and the run would silently skip it, leaving the
+    user with a schedule that never touches what they picked.
+    """
+    unknown = [
+        entity_id
+        for entity_id in schedule.get(CONF_TARGET_ENTITY_IDS) or []
+        if entity_id not in scheduler.target_entity_ids
+    ]
+    if unknown:
+        raise ServiceValidationError(
+            "Estas luzes não pertencem a esta zona: " + ", ".join(unknown)
+        )
+
+
+def _assert_schedule_id_is_free(
+    scheduler: LightScheduler, schedule_id: Any
+) -> None:
+    """Reject an id already used in this zone.
+
+    Two rows sharing an id make the second one unreachable: update edits every
+    match and remove deletes every match, so it can never be edited or deleted
+    on its own.
+    """
+    if any(
+        item.get(CONF_SCHEDULE_ID) == schedule_id
+        for item in scheduler.options.get(CONF_SCHEDULES, [])
+    ):
+        raise ServiceValidationError(
+            f"Já existe um agendamento com o id {schedule_id} nesta zona."
+        )
+
+
+def _find_schedule_or_fail(
+    scheduler: LightScheduler, schedule_id: str
+) -> dict[str, Any]:
+    """Return the single schedule with this id, or raise."""
+    matches = [
+        item
+        for item in scheduler.options.get(CONF_SCHEDULES, [])
+        if item.get(CONF_SCHEDULE_ID) == schedule_id
+    ]
+    if not matches:
+        raise ServiceValidationError(
+            f"Agendamento desconhecido em {scheduler.entry.title}: {schedule_id}"
+        )
+    if len(matches) > 1:
+        raise ServiceValidationError(
+            f"Existem {len(matches)} agendamentos com o id {schedule_id} em "
+            f"{scheduler.entry.title}; use set_schedules para corrigir a lista."
+        )
+    return matches[0]
+
+
 def _validated_schedule(value: Any) -> dict[str, Any]:
     """Validate service schedule input with a user-facing error."""
     if not isinstance(value, dict):
@@ -336,9 +395,18 @@ async def _register_services(hass: HomeAssistant) -> None:
         for scheduler in await _resolve(hass, call):
             await scheduler.async_stop()
 
+    # Every handler below validates all resolved zones BEFORE mutating any of
+    # them. Validating inside the apply loop meant a call naming two zones
+    # could persist the first and then raise on the second, leaving the caller
+    # with an error and a half-applied change.
+
     async def add(call: ServiceCall) -> None:
         schedule = _validated_schedule(_service_data(call))
-        for scheduler in await _resolve(hass, call):
+        schedulers = await _resolve(hass, call)
+        for scheduler in schedulers:
+            _assert_targets_in_zone(scheduler, schedule)
+            _assert_schedule_id_is_free(scheduler, schedule[CONF_SCHEDULE_ID])
+        for scheduler in schedulers:
             options = {
                 **scheduler.options,
                 CONF_SCHEDULES: [
@@ -352,19 +420,15 @@ async def _register_services(hass: HomeAssistant) -> None:
         schedule_id = _service_data(call).get(CONF_SCHEDULE_ID)
         if not isinstance(schedule_id, str) or not schedule_id:
             raise ServiceValidationError("Campo obrigatório ausente: id")
-        for scheduler in await _resolve(hass, call):
-            schedules = scheduler.options.get(CONF_SCHEDULES, [])
-            if not any(
-                item.get(CONF_SCHEDULE_ID) == schedule_id for item in schedules
-            ):
-                raise ServiceValidationError(
-                    f"Agendamento desconhecido: {schedule_id}"
-                )
+        schedulers = await _resolve(hass, call)
+        for scheduler in schedulers:
+            _find_schedule_or_fail(scheduler, schedule_id)
+        for scheduler in schedulers:
             options = {
                 **scheduler.options,
                 CONF_SCHEDULES: [
                     item
-                    for item in schedules
+                    for item in scheduler.options.get(CONF_SCHEDULES, [])
                     if item.get(CONF_SCHEDULE_ID) != schedule_id
                 ],
             }
@@ -375,7 +439,19 @@ async def _register_services(hass: HomeAssistant) -> None:
         if not isinstance(raw_schedules, list):
             raise ServiceValidationError("schedules deve ser uma lista")
         schedules = [_validated_schedule(value) for value in raw_schedules]
-        for scheduler in await _resolve(hass, call):
+        seen: set[str] = set()
+        for schedule in schedules:
+            schedule_id = schedule[CONF_SCHEDULE_ID]
+            if schedule_id in seen:
+                raise ServiceValidationError(
+                    f"Id repetido na lista de agendamentos: {schedule_id}"
+                )
+            seen.add(schedule_id)
+        schedulers = await _resolve(hass, call)
+        for scheduler in schedulers:
+            for schedule in schedules:
+                _assert_targets_in_zone(scheduler, schedule)
+        for scheduler in schedulers:
             await _update_options(
                 hass,
                 scheduler,
@@ -405,27 +481,30 @@ async def _register_services(hass: HomeAssistant) -> None:
             raise ServiceValidationError(
                 "Informe pelo menos um campo para alterar o agendamento."
             )
-        for scheduler in await _resolve(hass, call):
-            schedules: list[dict[str, Any]] = []
-            matched = False
-            for schedule in scheduler.options.get(CONF_SCHEDULES, []):
-                if schedule.get(CONF_SCHEDULE_ID) == schedule_id:
-                    schedules.append(_validated_schedule({
-                        **schedule,
-                        **patch,
-                        CONF_SCHEDULE_ID: schedule_id,
-                    }))
-                    matched = True
-                else:
-                    schedules.append(schedule)
-            if not matched:
-                raise ServiceValidationError(
-                    f"Agendamento desconhecido: {schedule_id}"
-                )
+        schedulers = await _resolve(hass, call)
+        updated: list[tuple[LightScheduler, dict[str, Any]]] = []
+        for scheduler in schedulers:
+            current = _find_schedule_or_fail(scheduler, schedule_id)
+            replacement = _validated_schedule({
+                **current,
+                **patch,
+                CONF_SCHEDULE_ID: schedule_id,
+            })
+            _assert_targets_in_zone(scheduler, replacement)
+            updated.append((scheduler, replacement))
+        for scheduler, replacement in updated:
             await _update_options(
                 hass,
                 scheduler,
-                {**scheduler.options, CONF_SCHEDULES: schedules},
+                {
+                    **scheduler.options,
+                    CONF_SCHEDULES: [
+                        replacement
+                        if item.get(CONF_SCHEDULE_ID) == schedule_id
+                        else item
+                        for item in scheduler.options.get(CONF_SCHEDULES, [])
+                    ],
+                },
             )
 
     async def set_options(call: ServiceCall) -> None:

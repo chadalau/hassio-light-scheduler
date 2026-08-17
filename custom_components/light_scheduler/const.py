@@ -29,6 +29,9 @@ HISTORY_MAX_ENTRIES = 200
 ACTUATION_GRACE = 15
 # Typical idle/standby draw is well under 1 W; anything above is treated as "on".
 POWER_CONFIRM_THRESHOLD_W = 1.0
+# A device integration that never returns from its service call would
+# otherwise hang the stop sequence, the finish timer and unload forever.
+SERVICE_CALL_TIMEOUT = 30
 
 SOURCE_SCHEDULE = "schedule"
 SOURCE_MANUAL = "manual"
