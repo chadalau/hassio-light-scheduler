@@ -1,4 +1,4 @@
-const CARD_VERSION = "0.8.3";
+const CARD_VERSION = "0.8.4";
 
 class LightScheduleCard extends HTMLElement {
   constructor() {
@@ -1133,11 +1133,11 @@ class LightScheduleCard extends HTMLElement {
           margin: -12px calc(-1 * var(--shell-inline)) 0;
           padding: 15px 20px 13px;
           overflow: hidden;
-          border-bottom: 1px solid rgba(var(--scheduler-header-accent-rgb), .24);
+          border: 1px solid rgba(var(--scheduler-header-accent-rgb), .42);
+          border-radius: var(--ha-card-border-radius, 12px) var(--ha-card-border-radius, 12px) 0 0;
           background:
             radial-gradient(circle at 0 0, rgba(var(--scheduler-header-accent-rgb), .12), transparent 42%),
             linear-gradient(115deg, rgba(var(--scheduler-header-accent-rgb), .055), rgba(127, 127, 127, .025) 48%, transparent 78%);
-          box-shadow: inset 3px 0 0 rgba(var(--scheduler-header-accent-rgb), .82);
         }
         .hero-header::after {
           content: "";
