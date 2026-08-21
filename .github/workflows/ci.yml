@@ -35,13 +35,16 @@ jobs:
       - name: Fail if any test was skipped
         run: |
           python - <<'PY'
-          import subprocess, sys
-          out = subprocess.run(
-              [sys.executable, "-m", "unittest", "discover", "-s", "tests"],
-              capture_output=True, text=True,
-          ).stderr
-          if "skipped" in out:
-              print(out)
+          import sys
+          import unittest
+
+          suite = unittest.defaultTestLoader.discover("tests")
+          result = unittest.TextTestRunner(verbosity=1).run(suite)
+          if not result.wasSuccessful():
+              sys.exit(1)
+          if result.skipped:
+              for test, reason in result.skipped:
+                  print(f"Skipped: {test.id()} ({reason})")
               sys.exit("A skipped test is not a passing test.")
           PY
 
