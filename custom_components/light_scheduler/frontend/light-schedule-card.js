@@ -1,4 +1,4 @@
-const CARD_VERSION = "0.8.1";
+const CARD_VERSION = "0.8.2";
 
 class LightScheduleCard extends HTMLElement {
   constructor() {
@@ -98,46 +98,66 @@ class LightScheduleCard extends HTMLElement {
     const schedules = Array.isArray(attrs.schedules) ? attrs.schedules : [];
     const enabled = attrs.enabled !== false;
     const active = Boolean(attrs.active);
-    const onCount = Number(attrs.lights_on ?? 0);
+    const onCount = Math.max(0, Math.round(this._number(attrs.lights_on)));
     const total = lights.length;
     const power = this._number(attrs.total_power_w);
     const zoneName = attrs.zone_name || attrs.friendly_name || "Sala";
+    const headerProgress = total > 0
+      ? Math.max(0, Math.min(100, Math.round((onCount / total) * 100)))
+      : 0;
+    const statusIcon = enabled ? "mdi:calendar-check-outline" : "mdi:calendar-remove-outline";
+    const statusTitle = enabled ? "Agendamento ativo" : "Agendamento pausado";
 
     this.shadowRoot.innerHTML = `
       ${this._styles()}
       <ha-card>
         <section class="shell">
-          <header class="header">
-            <div class="room-icon"><ha-icon icon="mdi:sofa-single"></ha-icon></div>
-            <h2 title="${this._escape(zoneName)}">${this._escape(zoneName)}</h2>
-            <span class="status-chip ${enabled ? "enabled" : "disabled"}">
-              <ha-icon icon="mdi:calendar-check-outline"></ha-icon>
-              ${enabled ? "Agendada" : "Pausada"}
-            </span>
-            ${this._toggleControl({
-              action: "toggle-zone-enabled",
-              checked: enabled,
-              label: "Ativar agendamento da zona",
-              title: this._scheduleSwitchEntityId()
-                ? (enabled ? "Pausar todos os agendamentos desta sala" : "Retomar os agendamentos desta sala")
-                : "Interruptor de agendamento da zona não encontrado",
-              disabled: !this._scheduleSwitchEntityId(),
-            })}
-            <button class="icon-button settings" type="button" data-action="open-zone-dialog" aria-label="Configurar zona" title="Configurar zona">
-              <ha-icon icon="mdi:cog-outline"></ha-icon>
-            </button>
-          </header>
+          <header class="hero-header">
+            <div class="hero-top">
+              <div class="hero-identity">
+                <div class="hero-icon" aria-hidden="true">
+                  <ha-icon icon="mdi:lightbulb-group-outline"></ha-icon>
+                </div>
+                <div class="hero-title-group">
+                  <span class="hero-eyebrow">Iluminação</span>
+                  <h2 title="${this._escape(zoneName)}">${this._escape(zoneName)}</h2>
+                </div>
+              </div>
+              <div class="hero-actions">
+                <span class="status-chip ${enabled ? "enabled" : "disabled"}" title="${this._escape(statusTitle)}">
+                  <ha-icon icon="${this._escape(statusIcon)}"></ha-icon>
+                  <span>${enabled ? "Agendada" : "Pausada"}</span>
+                </span>
+                ${this._toggleControl({
+                  action: "toggle-zone-enabled",
+                  checked: enabled,
+                  label: "Ativar agendamento da zona",
+                  title: this._scheduleSwitchEntityId()
+                    ? (enabled ? "Pausar todos os agendamentos desta sala" : "Retomar os agendamentos desta sala")
+                    : "Interruptor de agendamento da zona não encontrado",
+                  disabled: !this._scheduleSwitchEntityId(),
+                })}
+                <button class="icon-button settings" type="button" data-action="open-zone-dialog" aria-label="Configurar zona" title="Configurar zona">
+                  <ha-icon icon="mdi:cog-outline"></ha-icon>
+                </button>
+              </div>
+            </div>
 
-          <div class="summary">
-            <div>
-              <strong>${onCount} de ${total} ${total === 1 ? "luz ligada" : "luzes ligadas"}</strong>
-              <span>Próxima ação: ${this._escape(this._formatNext(attrs, state.state))}</span>
+            <div class="hero-summary">
+              <div class="hero-kpi">
+                <strong>${onCount} de ${total} ${total === 1 ? "luz ligada" : "luzes ligadas"}</strong>
+                <span><ha-icon icon="mdi:clock-outline"></ha-icon>Próxima ação: ${this._escape(this._formatNext(attrs, state.state))}</span>
+              </div>
+              <div class="hero-secondary">
+                <span>Potência total</span>
+                <strong>${this._formatPower(power)}</strong>
+              </div>
             </div>
-            <div class="power-total">
-              <span>Potência total</span>
-              <strong>${this._formatPower(power)}</strong>
+
+            <div class="hero-rail" role="progressbar" aria-label="Proporção de luzes ligadas" aria-valuemin="0" aria-valuemax="${this._escape(total || 1)}" aria-valuenow="${this._escape(onCount)}">
+              <span style="width: ${this._escape(headerProgress)}%"></span>
             </div>
-          </div>
+          </header>
 
           ${active ? this._activeRun(attrs) : ""}
 
@@ -1121,33 +1141,80 @@ class LightScheduleCard extends HTMLElement {
   _styles() {
     return `
       <style>
-        :host { display: block; --ls-blue: var(--primary-color, #2196f3); --ls-green: #76d84b; --ls-amber: #ffc421; }
+        :host {
+          display: block;
+          --ls-blue: var(--primary-color, #2196f3);
+          --ls-green: #76d84b;
+          --ls-amber: #ffc421;
+          --scheduler-header-accent: var(--ls-amber);
+          --scheduler-header-accent-rgb: 255, 196, 33;
+          --scheduler-state-ok: var(--ls-green);
+          --scheduler-state-warning: #ffb300;
+          --scheduler-state-critical: var(--error-color, #ff5252);
+          --scheduler-state-neutral: var(--secondary-text-color, #a0a0a0);
+        }
         * { box-sizing: border-box; }
-        ha-card { overflow: hidden; color: var(--primary-text-color); background: var(--ha-card-background, var(--card-background-color)); }
+        ha-card { display: block; overflow: hidden; color: var(--primary-text-color); background: var(--ha-card-background, var(--card-background-color)); }
         button, input, select { font: inherit; }
         button { color: inherit; }
-        .shell { padding: 12px 14px 13px; }
+        .shell { --shell-inline: 14px; padding: 12px var(--shell-inline) 13px; }
         .loading, .error { padding: 18px; font-size: 14px; }
         .error { color: var(--error-color); }
-        .header { display: grid; grid-template-columns: 34px minmax(0, 1fr) auto auto 30px; align-items: center; gap: 8px; }
-        .room-icon { width: 32px; height: 32px; display: grid; place-items: center; border-radius: 50%; background: rgba(128,128,128,.22); color: var(--secondary-text-color); }
-        .room-icon ha-icon { --mdc-icon-size: 20px; }
-        h2 { margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 20px; line-height: 1.2; font-weight: 700; }
+        .hero-header {
+          position: relative;
+          margin: -12px calc(-1 * var(--shell-inline)) 0;
+          padding: 15px 20px 13px;
+          overflow: hidden;
+          border-bottom: 1px solid rgba(var(--scheduler-header-accent-rgb), .24);
+          background:
+            radial-gradient(circle at 0 0, rgba(var(--scheduler-header-accent-rgb), .12), transparent 42%),
+            linear-gradient(115deg, rgba(var(--scheduler-header-accent-rgb), .055), rgba(127, 127, 127, .025) 48%, transparent 78%);
+          box-shadow: inset 3px 0 0 rgba(var(--scheduler-header-accent-rgb), .82);
+        }
+        .hero-header::after {
+          content: "";
+          position: absolute;
+          inset: 0;
+          pointer-events: none;
+          background: linear-gradient(90deg, transparent, rgba(255,255,255,.018), transparent);
+        }
+        .hero-top { position: relative; z-index: 1; display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 12px; }
+        .hero-identity { min-width: 0; display: flex; align-items: center; gap: 11px; }
+        .hero-icon {
+          width: 46px;
+          height: 46px;
+          flex: none;
+          display: grid;
+          place-items: center;
+          border: 1px solid rgba(var(--scheduler-header-accent-rgb), .34);
+          border-radius: 50%;
+          color: var(--scheduler-header-accent);
+          background: linear-gradient(145deg, rgba(var(--scheduler-header-accent-rgb), .18), rgba(var(--scheduler-header-accent-rgb), .055));
+          box-shadow: 0 0 22px rgba(var(--scheduler-header-accent-rgb), .13), inset 0 1px 0 rgba(255,255,255,.08);
+        }
+        .hero-icon ha-icon { --mdc-icon-size: 25px; filter: drop-shadow(0 0 6px rgba(var(--scheduler-header-accent-rgb), .35)); }
+        .hero-title-group { min-width: 0; }
+        .hero-eyebrow { display: block; margin-bottom: 2px; color: var(--scheduler-header-accent); font-size: 9px; line-height: 1.2; font-weight: 800; letter-spacing: 1.25px; text-transform: uppercase; }
+        .hero-title-group h2 { margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 20px; line-height: 1.2; font-weight: 700; }
         h3 { margin: 0 0 8px 6px; font-size: 13px; line-height: 1.25; font-weight: 600; }
-        .status-chip { height: 24px; padding: 0 8px; display: inline-flex; align-items: center; gap: 4px; border: 1px solid currentColor; border-radius: 5px; font-size: 11px; font-weight: 600; }
+        .hero-actions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; }
+        .status-chip { height: 26px; padding: 0 9px; display: inline-flex; align-items: center; justify-content: center; gap: 5px; border: 1px solid currentColor; border-radius: 999px; font-size: 10px; font-weight: 700; white-space: nowrap; }
         .status-chip ha-icon { --mdc-icon-size: 14px; }
-        .status-chip.enabled { color: var(--ls-green); background: rgba(73, 190, 42, .09); }
-        .status-chip.disabled { color: var(--secondary-text-color); }
+        .status-chip.enabled { color: var(--scheduler-state-ok); background: rgba(73, 190, 42, .085); box-shadow: inset 0 0 12px rgba(73, 190, 42, .04); }
+        .status-chip.disabled { color: var(--scheduler-state-neutral); background: rgba(127,127,127,.06); }
         .icon-button { width: 30px; height: 30px; display: grid; place-items: center; padding: 0; border: 0; background: transparent; cursor: pointer; border-radius: 50%; }
         .icon-button:hover { background: rgba(127,127,127,.14); }
         .icon-button ha-icon { --mdc-icon-size: 20px; }
-        .summary { margin: 12px 6px 0; display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: end; gap: 14px; }
-        .summary > div:first-child { min-width: 0; }
-        .summary strong { display: block; font-size: 22px; line-height: 1.1; letter-spacing: -.35px; }
-        .summary span { display: block; margin-top: 5px; color: var(--secondary-text-color); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-        .power-total { text-align: right; min-width: 78px; }
-        .power-total span { margin: 0; font-size: 10px; }
-        .power-total strong { margin-top: 1px; font-size: 21px; }
+        .hero-summary { position: relative; z-index: 1; margin-top: 14px; display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: end; gap: 18px; }
+        .hero-kpi { min-width: 0; }
+        .hero-kpi strong { display: block; overflow: hidden; color: var(--primary-text-color); font-size: 22px; line-height: 1.08; font-weight: 750; letter-spacing: -.4px; text-overflow: ellipsis; white-space: nowrap; }
+        .hero-kpi span { min-width: 0; margin-top: 6px; display: flex; align-items: center; gap: 5px; overflow: hidden; color: var(--secondary-text-color); font-size: 10px; line-height: 1.2; text-overflow: ellipsis; white-space: nowrap; }
+        .hero-kpi ha-icon { --mdc-icon-size: 13px; flex: none; color: var(--scheduler-header-accent); }
+        .hero-secondary { min-width: 88px; text-align: right; }
+        .hero-secondary span { display: block; color: var(--secondary-text-color); font-size: 9px; line-height: 1.2; letter-spacing: .35px; text-transform: uppercase; }
+        .hero-secondary strong { display: block; margin-top: 3px; color: var(--primary-text-color); font-size: 20px; line-height: 1; letter-spacing: -.25px; }
+        .hero-rail { position: relative; z-index: 1; height: 3px; margin-top: 12px; overflow: hidden; border-radius: 999px; background: rgba(127,127,127,.18); }
+        .hero-rail span { display: block; height: 100%; border-radius: inherit; background: linear-gradient(90deg, rgba(var(--scheduler-header-accent-rgb), .55), var(--scheduler-header-accent)); box-shadow: 0 0 8px rgba(var(--scheduler-header-accent-rgb), .35); transition: width .25s ease; }
         .run-status { margin: 10px 6px 0; }
         .run-line { display: flex; align-items: center; justify-content: space-between; gap: 10px; color: var(--secondary-text-color); font-size: 10px; }
         .run-line span:first-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -1303,11 +1370,22 @@ class LightScheduleCard extends HTMLElement {
         .cancel-button { border: 1px solid rgba(127,127,127,.35); background: transparent; }
         .save-button { border: 1px solid var(--ls-blue); background: var(--ls-blue); color: white; }
         @media (max-width: 390px) {
-          .shell { padding-inline: 10px; }
-          .summary strong { font-size: 20px; }
-          .power-total strong { font-size: 19px; }
+          .shell { --shell-inline: 10px; }
+          .hero-header { padding-inline: 14px; }
+          .hero-top { gap: 8px; }
+          .hero-identity { gap: 8px; }
+          .hero-icon { width: 40px; height: 40px; }
+          .hero-icon ha-icon { --mdc-icon-size: 22px; }
+          .hero-actions { gap: 5px; }
+          .status-chip { width: 28px; padding: 0; }
+          .status-chip > span { display: none; }
+          .hero-kpi strong { font-size: 19px; }
+          .hero-secondary strong { font-size: 18px; }
           .power-pill { display: none; }
           .schedule-row { grid-template-columns: 26px 16px 84px auto minmax(0,1fr) 22px 22px; padding-inline: 6px; gap: 4px; }
+        }
+        @media (prefers-reduced-motion: reduce) {
+          .hero-rail span { transition: none; }
         }
         @media (max-width: 560px) {
           .mapping-header { display: none; }
