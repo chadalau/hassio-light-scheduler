@@ -1,4 +1,4 @@
-const CARD_VERSION = "0.7.0";
+const CARD_VERSION = "0.8.0";
 
 class LightScheduleCard extends HTMLElement {
   constructor() {
@@ -15,8 +15,13 @@ class LightScheduleCard extends HTMLElement {
     this.shadowRoot.addEventListener("keydown", (event) => this._handleKeyDown(event));
   }
 
-  static getStubConfig() {
-    return { entity: "sensor.light_scheduler" };
+  static getStubConfig(hass) {
+    // Pick a zone that actually exists: a hardcoded id made the card preview in
+    // the picker render "Entidade nao encontrada" on every install.
+    const zone = Object.values(hass?.states || {}).find(
+      (state) => Array.isArray(state.attributes?.lights) && state.attributes?.entry_id
+    );
+    return { entity: zone?.entity_id || "sensor.sala_proxima_execucao" };
   }
 
   setConfig(config) {
@@ -93,8 +98,8 @@ class LightScheduleCard extends HTMLElement {
     const schedules = Array.isArray(attrs.schedules) ? attrs.schedules : [];
     const enabled = attrs.enabled !== false;
     const active = Boolean(attrs.active);
-    const onCount = Number(attrs.lights_on ?? attrs.on_count ?? 0);
-    const total = Number(attrs.total_lights ?? lights.length ?? 0);
+    const onCount = Number(attrs.lights_on ?? 0);
+    const total = lights.length;
     const power = this._number(attrs.total_power_w);
     const zoneName = attrs.zone_name || attrs.friendly_name || "Sala";
 
@@ -143,7 +148,7 @@ class LightScheduleCard extends HTMLElement {
           <div class="divider section-divider"></div>
           <h3>Agenda automática</h3>
           <div class="schedules">
-            ${schedules.length ? schedules.map((schedule) => this._scheduleRow(schedule)).join("") : `<div class="empty-schedule">Nenhum agendamento criado.</div>`}
+            ${schedules.length ? schedules.map((schedule) => this._scheduleRow(schedule, attrs.schedule_warnings)).join("") : `<div class="empty-schedule">Nenhum agendamento criado.</div>`}
           </div>
           <button class="add-button" type="button" data-action="add-schedule">
             <ha-icon icon="mdi:plus"></ha-icon>
@@ -164,9 +169,9 @@ class LightScheduleCard extends HTMLElement {
     const stopping = Boolean(attrs.stopping);
     const source = stopping
       ? "Desligando em sequência"
-      : (attrs.source || attrs.active_source) === "manual"
+      : attrs.source === "manual"
         ? "Acionamento manual"
-        : `Ligada desde ${this._formatClock(attrs.started_at || attrs.active_start)}`;
+        : `Ligada desde ${this._formatClock(attrs.started_at)}`;
     return `
       <div class="run-status">
         <div class="run-line">
@@ -232,21 +237,41 @@ class LightScheduleCard extends HTMLElement {
     `;
   }
 
-  _scheduleRow(schedule) {
+  _warningText(code) {
+    if (code === "targets_removed") {
+      return "As luzes deste horário saíram da zona. Edite o horário e escolha as luzes de novo para reativá-lo.";
+    }
+    if (code === "ambiguous_time") {
+      return "Este horário acontece duas vezes na volta do horário de verão; a primeira ocorrência será usada.";
+    }
+    return "";
+  }
+
+  _scheduleRow(schedule, computedWarnings) {
     const id = String(schedule.id || "");
     const enabled = schedule.enabled !== false;
     const start = String(schedule.time || schedule.start || "--:--").slice(0, 5);
     const end = this._scheduleEnd(schedule);
+    // A persisted warning means the row needs the user to act; a computed one
+    // only describes what will happen.
+    const blocking = String(schedule.warning || "");
+    const warning = blocking || String(computedWarnings?.[id] || "");
+    const warningText = this._warningText(warning);
     return `
-      <div class="schedule-row ${enabled ? "" : "is-disabled"}">
+      <div class="schedule-row ${enabled ? "" : "is-disabled"} ${warning ? "has-warning" : ""}">
         ${this._toggleControl({
           action: "toggle-schedule-enabled",
           checked: enabled,
           label: "Ativar agendamento",
-          title: enabled ? "Desativar este agendamento" : "Ativar este agendamento",
+          title: blocking
+            ? warningText
+            : enabled ? "Desativar este agendamento" : "Ativar este agendamento",
           dataset: { "schedule-id": id },
+          disabled: Boolean(blocking),
         })}
-        <ha-icon class="clock" icon="mdi:clock-outline"></ha-icon>
+        ${warningText
+          ? `<ha-icon class="row-warning" icon="mdi:alert-outline" title="${this._escape(warningText)}"></ha-icon>`
+          : `<ha-icon class="clock" icon="mdi:clock-outline"></ha-icon>`}
         <span class="time-range"><strong>${this._escape(start)}</strong><i>→</i><strong>${this._escape(end)}</strong></span>
         <span class="duration-chip" title="Duração"><ha-icon icon="mdi:timer-outline"></ha-icon>${this._escape(this._formatDuration(schedule.duration))}</span>
         <span class="days" title="${this._escape(this._formatDays(schedule.days))}">${this._escape(this._formatDays(schedule.days))}</span>
@@ -266,8 +291,8 @@ class LightScheduleCard extends HTMLElement {
           </div>
           <input type="hidden" name="schedule_id">
           <div class="fields">
-            <label>Horário de acender<input name="start" type="time" required value="18:30"></label>
-            <label>Horário de apagar<input name="end" type="time" required value="22:30"></label>
+            <label>Horário de acender<input name="start" type="time" step="1" required value="18:30"></label>
+            <label>Horário de apagar<input name="end" type="time" step="1" required value="22:30"></label>
           </div>
           <div class="duration-preview"><ha-icon icon="mdi:timer-outline"></ha-icon><span>Ficará acesa por <strong data-duration-preview>4h</strong></span></div>
           <label class="interval-setting">
@@ -333,9 +358,11 @@ class LightScheduleCard extends HTMLElement {
     const mappings = Array.isArray(attrs.entity_mappings) && attrs.entity_mappings.length
       ? attrs.entity_mappings
       : (attrs.lights || []).map((light) => ({
-          name: light.name || "",
+          name: "",
           target_entity_id: light.entity_id || "",
-          power_entity_id: light.power_entity_id || "",
+          power_entity_id: "",
+          display_name: light.name || "",
+          resolved_power_entity_id: light.power_entity_id || "",
         }));
     return `
       <dialog class="zone-dialog">
@@ -366,27 +393,38 @@ class LightScheduleCard extends HTMLElement {
 
   _mappingRow(mapping = {}, index = 0) {
     const target = mapping.target_entity_id || "";
+    // Only what the user actually chose goes into the fields. Pre-filling them
+    // with the resolved name and the auto-discovered sensor turned "automatic"
+    // into "manual" the moment anyone pressed save.
     const power = mapping.power_entity_id || "";
-    const fallbackName = this._hass?.states?.[target]?.attributes?.friendly_name || "";
-    const name = mapping.name || fallbackName;
+    const resolvedPower = mapping.resolved_power_entity_id || "";
+    const displayName =
+      mapping.display_name || this._hass?.states?.[target]?.attributes?.friendly_name || "";
+    const threshold = mapping.power_threshold_w;
     return `
-      <div class="mapping-row" data-mapping-row>
+      <div class="mapping-row" data-mapping-row${threshold == null ? "" : ` data-threshold="${this._escape(threshold)}"`}>
         <span class="mapping-order">${index + 1}</span>
-        <input class="mapping-name" name="mapping_name" type="text" value="${this._escape(name)}" placeholder="Nome" aria-label="Nome da entrada ${index + 1}">
+        <input class="mapping-name" name="mapping_name" type="text" value="${this._escape(mapping.name || "")}"
+          placeholder="${this._escape(displayName || "Nome")}" aria-label="Nome da entrada ${index + 1}">
         ${this._entityAutocomplete("target", target, index)}
-        ${this._entityAutocomplete("power", power, index)}
+        ${this._entityAutocomplete("power", power, index, resolvedPower)}
         <button class="remove-mapping-button" type="button" data-action="remove-mapping-row" aria-label="Remover entrada ${index + 1}" title="Remover"><ha-icon icon="mdi:delete-outline"></ha-icon></button>
       </div>
     `;
   }
 
-  _entityAutocomplete(kind, selected = "", index = 0) {
+  _entityAutocomplete(kind, selected = "", index = 0, resolved = "") {
     const choices = this._entityChoices(kind);
     const selectedChoice = choices.find((choice) => choice.id === selected);
-    const value = selectedChoice?.label || (selected ? selected : "");
+    const value = selected ? selectedChoice?.label || selected : "";
     const field = kind === "target" ? "mapping_target" : "mapping_power";
     const label = kind === "target" ? "Luz ou interruptor" : "Potência";
-    const placeholder = kind === "target" ? "Digite para buscar luz…" : "Digite para buscar potência…";
+    const resolvedChoice = resolved ? choices.find((choice) => choice.id === resolved) : null;
+    const placeholder = kind === "target"
+      ? "Digite para buscar luz…"
+      : resolved
+        ? `Automático: ${resolvedChoice?.name || resolved}`
+        : "Digite para buscar potência…";
     return `
       <div class="entity-autocomplete" data-autocomplete data-kind="${kind}">
         <input class="autocomplete-input" type="search" autocomplete="off" spellcheck="false"
@@ -744,11 +782,17 @@ class LightScheduleCard extends HTMLElement {
 
   async _saveZone() {
     const dialog = this._zoneDialogElement();
-    const mappings = [...dialog.querySelectorAll("[data-mapping-row]")].map((row) => ({
-      name: row.querySelector('[name="mapping_name"]').value.trim(),
-      target_entity_id: row.querySelector('[data-field="mapping_target"]').dataset.selectedId || "",
-      power_entity_id: row.querySelector('[data-field="mapping_power"]').dataset.selectedId || "",
-    }));
+    const mappings = [...dialog.querySelectorAll("[data-mapping-row]")].map((row) => {
+      const mapping = {
+        name: row.querySelector('[name="mapping_name"]').value.trim(),
+        target_entity_id: row.querySelector('[data-field="mapping_target"]').dataset.selectedId || "",
+        power_entity_id: row.querySelector('[data-field="mapping_power"]').dataset.selectedId || "",
+      };
+      // Set through the service, not the dialog; saving from the card must not
+      // silently reset it to the default.
+      if (row.dataset.threshold) mapping.power_threshold_w = Number(row.dataset.threshold);
+      return mapping;
+    });
     const error = dialog.querySelector("[data-zone-error]");
     if (!mappings.length || mappings.some((item) => !item.target_entity_id)) {
       error.textContent = "Selecione uma luz ou tomada em todas as entradas.";
@@ -927,16 +971,6 @@ class LightScheduleCard extends HTMLElement {
     return hours * 3600 + minutes * 60 + seconds;
   }
 
-  _timeToMinutes(value) {
-    const seconds = this._timeToSeconds(value);
-    return seconds == null ? null : Math.floor(seconds / 60);
-  }
-
-  _minutesToTime(value) {
-    const minutes = ((Number(value) % 1440) + 1440) % 1440;
-    return `${String(Math.floor(minutes / 60)).padStart(2, "0")}:${String(minutes % 60).padStart(2, "0")}`;
-  }
-
   _secondsToTime(value) {
     const seconds = ((Number(value) % 86400) + 86400) % 86400;
     const hours = Math.floor(seconds / 3600);
@@ -975,7 +1009,7 @@ class LightScheduleCard extends HTMLElement {
 
   _syncTimer() {
     const attrs = this._state?.attributes || {};
-    const active = Boolean(attrs.active && (attrs.finishes_at || attrs.active_end));
+    const active = Boolean(attrs.active && attrs.finishes_at);
     if (active && !this._timer) this._timer = window.setInterval(() => this._tick(), 1000);
     if (!active) this._clearTimer();
   }
@@ -987,8 +1021,8 @@ class LightScheduleCard extends HTMLElement {
 
   _tick() {
     const attrs = this._state?.attributes || {};
-    const end = Date.parse(attrs.finishes_at || attrs.active_end || "");
-    const start = Date.parse(attrs.started_at || attrs.active_start || "");
+    const end = Date.parse(attrs.finishes_at || "");
+    const start = Date.parse(attrs.started_at || "");
     if (!Number.isFinite(end)) return;
     const remaining = Math.max(0, end - Date.now());
     const countdown = this.shadowRoot.querySelector("[data-countdown]");
@@ -1008,10 +1042,9 @@ class LightScheduleCard extends HTMLElement {
   }
 
   _formatNext(attrs, sensorState) {
-    const finish = attrs.finishes_at || attrs.active_end;
-    if (attrs.active && finish) return `desligar às ${this._formatClock(finish)}`;
-    const fallback = new Date(sensorState);
-    const next = attrs.next_run || (Number.isNaN(fallback.getTime()) ? null : sensorState);
+    if (attrs.active && attrs.finishes_at) return `desligar às ${this._formatClock(attrs.finishes_at)}`;
+    // The next start is the sensor's own state, an ISO timestamp.
+    const next = Number.isNaN(new Date(sensorState).getTime()) ? null : sensorState;
     if (!next) return "nenhuma ação programada";
     const date = new Date(next);
     if (Number.isNaN(date.getTime())) return String(next);
@@ -1259,6 +1292,8 @@ class LightScheduleCard extends HTMLElement {
         .add-mapping-button { width: 100%; height: 34px; margin-top: 7px; display: flex; align-items: center; justify-content: center; gap: 6px; border: 1px dashed rgba(33,150,243,.55); border-radius: 6px; color: var(--ls-blue); background: rgba(33,150,243,.04); font-size: 10px; cursor: pointer; }
         .add-mapping-button:hover { background: rgba(33,150,243,.1); }
         .add-mapping-button ha-icon { --mdc-icon-size: 17px; }
+        .schedule-row.has-warning { box-shadow: inset 2px 0 0 var(--ls-amber); }
+        .row-warning { color: var(--ls-amber); --mdc-icon-size: 15px; }
         .zone-help { margin-top: 9px; color: var(--secondary-text-color); font-size: 9px; line-height: 1.4; }
         .zone-actions { grid-template-columns: auto 1fr auto auto; }
         .advanced-button { padding-left: 0 !important; border: 0; color: var(--ls-blue); background: transparent; font-size: 10px; }

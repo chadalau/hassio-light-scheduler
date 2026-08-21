@@ -67,6 +67,11 @@ add_schedule:
       name: Luzes deste horário
       description: Deixe vazio para usar todas as luzes da zona.
       selector: {entity: {multiple: true, filter: [{domain: light}, {domain: switch}]}}
+    enabled:
+      name: Ativo
+      description: Crie o horário já pausado informando falso.
+      default: true
+      selector: {boolean: {}}
 remove_schedule:
   name: Remover agendamento
   target:
@@ -143,7 +148,11 @@ set_zone_options:
       selector: {text: {}}
     entity_mappings:
       name: Entradas de iluminação
-      description: Lista ordenada com nome, luz ou tomada e sensor de potência.
+      description: >-
+        Lista ordenada de objetos com name, target_entity_id, power_entity_id e,
+        opcionalmente, power_threshold_w - os watts acima dos quais aquela entrada
+        conta como acesa (padrão 1 W). Baixe o limiar para fitas de LED de menos de
+        1 W, que nunca confirmariam o acendimento com o padrão.
       selector: {object: {}}
     default_duration:
       selector: {number: {min: 1, max: 86400, unit_of_measurement: s, mode: box}}

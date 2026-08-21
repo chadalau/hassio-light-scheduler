@@ -33,6 +33,18 @@ O card permite:
 - definir um intervalo de 0 a 300 segundos para acender e apagar as entradas uma por vez, sempre na mesma ordem; o horário de apagar inicia a sequência de desligamento;
 - abrir a configuração da zona pelo ícone de engrenagem.
 
+Um agendamento marcado com ⚠ precisa de atenção. Se as luzes escolhidas naquele
+horário saírem da zona, o horário é pausado automaticamente e o interruptor dele fica
+travado até você editá-lo e escolher as luzes de novo — pausar é mais seguro do que
+voltar a acender a sala inteira sem você pedir. O aviso também aparece, sem travar
+nada, no horário que cai na hora repetida da volta do horário de verão; nesse caso a
+integração usa a primeira ocorrência.
+
+No campo **Nome** e no campo de potência, o texto em cinza é o que a integração
+encontrou sozinha. Deixe em branco para continuar automático: o nome acompanha
+renomeações da luz no Home Assistant e o sensor continua sendo descoberto pelo
+dispositivo. Só o que você digitar vira configuração fixa.
+
 Execuções em andamento são persistidas. Se o Home Assistant reiniciar, a integração restaura o horário de desligamento; ao remover ou descarregar uma zona ativa, as luzes da execução são desligadas na ordem configurada.
 
 ## Serviços
@@ -46,3 +58,14 @@ Execuções em andamento são persistidas. Se o Home Assistant reiniciar, a inte
 - `light_scheduler.set_zone_options`: altera entidades e duração padrão.
 
 Os serviços podem receber uma entidade do Light Scheduler como alvo. O card usa internamente o `entry_id` da zona para que todos os seus controles funcionem sem configuração adicional.
+
+`turn_on_now` e `stop` retornam assim que a execução é registrada: a sequência com
+intervalo entre as luzes roda em segundo plano, então um script que chame esses
+serviços não fica preso durante o acendimento ou o desligamento. Acompanhe o
+resultado pelo sensor binário **Execução ativa**.
+
+Em `set_zone_options`, cada entrada de `entity_mappings` aceita `power_threshold_w`:
+os watts acima dos quais aquela luz conta como acesa, usados na confirmação por
+potência. O padrão é 1 W; baixe para uma fita de LED de menos de 1 W, que nunca
+confirmaria o acendimento com o padrão, e suba para uma tomada com consumo de repouso
+mais alto.

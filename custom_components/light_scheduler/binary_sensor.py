@@ -12,6 +12,9 @@ class LightScheduleActive(BinarySensorEntity):
     _attr_has_entity_name = True
     _attr_translation_key = "active"
     _attr_should_poll = False
+    # Up to 200 run records ride in these attributes; recording them would write
+    # the whole list again on every single state change.
+    _unrecorded_attributes = frozenset({"history", "warnings"})
     def __init__(self, scheduler, entry):
         self.scheduler, self.entry = scheduler, entry
         self._attr_unique_id = f"{entry.entry_id}_active"

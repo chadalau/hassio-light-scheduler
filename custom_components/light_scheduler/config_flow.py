@@ -12,6 +12,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers import selector
 
 from .power import is_power_sensor
+from .schedules import prune_schedule_targets
 
 from .const import (
     CONF_DEFAULT_DURATION,
@@ -20,6 +21,7 @@ from .const import (
     CONF_MAX_DURATION,
     CONF_NAME,
     CONF_POWER_ENTITY_IDS,
+    CONF_POWER_THRESHOLD,
     CONF_SCHEDULES,
     CONF_TARGET_ENTITY_IDS,
     DEFAULT_DEFAULT_DURATION,
@@ -84,31 +86,48 @@ def _build_mappings(
             power = available_powers.pop(0)
         if power:
             used_powers.add(power)
-        result.append(
-            {
-                "name": str(existing_item.get("name") or ""),
-                "target_entity_id": target,
-                "power_entity_id": power,
-            }
-        )
+        entry = {
+            "name": str(existing_item.get("name") or ""),
+            "target_entity_id": target,
+            "power_entity_id": power,
+        }
+        threshold = existing_item.get(CONF_POWER_THRESHOLD)
+        if threshold is not None:
+            entry[CONF_POWER_THRESHOLD] = threshold
+        result.append(entry)
     return result
+
+
+def _duplicate_zone(
+    entries: list[ConfigEntry], targets: list[str], skip_entry_id: str | None = None
+) -> bool:
+    """Return whether another zone already controls exactly these entities.
+
+    Checked against what the zones control *right now*, not against a unique id
+    frozen when they were created: editing a zone's lights used to leave that id
+    behind, so a new zone could be rejected over a light the other zone had
+    already given up.
+    """
+    wanted = frozenset(targets)
+    return any(
+        entry.entry_id != skip_entry_id
+        and frozenset(entry.options.get(CONF_TARGET_ENTITY_IDS, [])) == wanted
+        for entry in entries
+    )
 
 
 def _schema(values: dict[str, Any] | None = None, *, persisted: bool = False) -> vol.Schema:
     """Build the zone form with safe initial values."""
-    supplied_values = values is not None
     values = values or {}
-    default_duration = (
-        DEFAULT_DEFAULT_DURATION
-        if persisted or supplied_values
-        else DEFAULT_DEFAULT_DURATION // 60
+    # Stored values are seconds; anything coming back from the form is already
+    # in minutes, including the default shown on a blank form.
+    raw_duration = float(
+        values.get(
+            CONF_DEFAULT_DURATION,
+            DEFAULT_DEFAULT_DURATION if persisted else DEFAULT_DEFAULT_DURATION // 60,
+        )
     )
-    raw_duration = float(values.get(CONF_DEFAULT_DURATION, default_duration))
-    duration_minutes = (
-        max(1 / 60, raw_duration / 60)
-        if persisted
-        else max(1 / 60, raw_duration)
-    )
+    duration_minutes = max(1 / 60, raw_duration / 60 if persisted else raw_duration)
     return vol.Schema(
         {
             vol.Required(CONF_NAME, default=values.get(CONF_NAME, "Sala")): (
@@ -160,9 +179,9 @@ class LightSchedulerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 errors[CONF_TARGET_ENTITY_IDS] = "no_lights"
             elif _invalid_power_sensors(self.hass, power_ids):
                 errors[CONF_POWER_ENTITY_IDS] = "not_power_sensor"
+            elif _duplicate_zone(list(self._async_current_entries()), targets):
+                errors[CONF_TARGET_ENTITY_IDS] = "duplicate_zone"
             else:
-                await self.async_set_unique_id("|".join(sorted(targets)))
-                self._abort_if_unique_id_configured()
                 name = str(user_input[CONF_NAME]).strip()
                 return self.async_create_entry(
                     title=name,
@@ -208,11 +227,23 @@ class LightSchedulerOptionsFlow(config_entries.OptionsFlow):
                 errors[CONF_TARGET_ENTITY_IDS] = "no_lights"
             elif _invalid_power_sensors(self.hass, power_ids):
                 errors[CONF_POWER_ENTITY_IDS] = "not_power_sensor"
+            elif _duplicate_zone(
+                list(self.hass.config_entries.async_entries(DOMAIN)),
+                targets,
+                self.config_entry.entry_id,
+            ):
+                errors[CONF_TARGET_ENTITY_IDS] = "duplicate_zone"
             if errors:
                 return self.async_show_form(
                     step_id="init", data_schema=_schema(user_input), errors=errors
                 )
             name = str(user_input[CONF_NAME]).strip()
+            # A schedule narrowed to a light that just left the zone would
+            # resolve to an empty target list and never run again, so the
+            # selections are pruned along with the zone itself.
+            schedules, _ = prune_schedule_targets(
+                self.config_entry.options.get(CONF_SCHEDULES, []), targets
+            )
             options = {
                 **self.config_entry.options,
                 CONF_TARGET_ENTITY_IDS: targets,
@@ -225,6 +256,7 @@ class LightSchedulerOptionsFlow(config_entries.OptionsFlow):
                 CONF_DEFAULT_DURATION: round(
                     float(user_input[CONF_DEFAULT_DURATION]) * 60
                 ),
+                CONF_SCHEDULES: schedules,
             }
             # OptionsFlowManager persists the data returned by
             # async_create_entry as the entry options. Updating options here

@@ -113,6 +113,15 @@ class FakeHass:
         self.calls: list[tuple[str, str]] = []
         self.hang = hang
         self.services = types.SimpleNamespace(async_call=self._async_call)
+        self.tasks: list[object] = []
+
+    def async_create_task(self, coroutine):
+        """Schedule work the way Home Assistant does: queued, not run inline."""
+        import asyncio
+
+        task = asyncio.ensure_future(coroutine)
+        self.tasks.append(task)
+        return task
 
     async def _async_call(self, domain, service, data, blocking=False):
         self.calls.append((service, data["entity_id"]))

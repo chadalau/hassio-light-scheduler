@@ -15,13 +15,14 @@ from homeassistant.helpers.event import async_track_point_in_time, async_track_s
 from homeassistant.util import dt as dt_util
 
 from .const import (ACTUATION_GRACE, CONF_DEFAULT_DURATION, CONF_ENABLED, CONF_ENTITY_MAPPINGS, CONF_MAX_DURATION,
-                    CONF_POWER_ENTITY_IDS, CONF_SCHEDULE_DAYS, CONF_SCHEDULE_DURATION, CONF_SCHEDULE_ID,
-                    CONF_SCHEDULE_INTERVAL, CONF_SCHEDULE_TIME, CONF_SCHEDULES, CONF_TARGET_ENTITY_IDS,
-                    HISTORY_MAX_ENTRIES, HISTORY_RETENTION_DAYS, MAX_SCHEDULE_INTERVAL, POWER_CONFIRM_THRESHOLD_W,
-                    SERVICE_CALL_TIMEOUT, SIGNAL_UPDATE, SOURCE_EXTERNAL, SOURCE_MANUAL, SOURCE_SCHEDULE)
+                    CONF_POWER_ENTITY_IDS, CONF_POWER_THRESHOLD, CONF_SCHEDULE_DURATION, CONF_SCHEDULE_ID,
+                    CONF_SCHEDULE_INTERVAL, CONF_SCHEDULES, CONF_TARGET_ENTITY_IDS,
+                    DEFAULT_POWER_THRESHOLD_W, HISTORY_MAX_ENTRIES, HISTORY_RETENTION_DAYS, MAX_SCHEDULE_INTERVAL,
+                    SERVICE_CALL_TIMEOUT, SIGNAL_UPDATE, SOURCE_EXTERNAL, SOURCE_MANUAL, SOURCE_SCHEDULE,
+                    WARNING_AMBIGUOUS_TIME)
 from .power import read_power_watts
 from .store import RuntimeStore
-from .next_run import find_next_run
+from .next_run import ambiguous_schedule_ids, find_next_run
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -52,6 +53,14 @@ class LightScheduler:
         self._ramp_task: asyncio.Task | None = None
         self._stop_task: asyncio.Task | None = None
         self._unloading = False
+        # A schedule that fired while the shutdown sequence still owned the zone.
+        # It is replayed once the zone is idle instead of being dropped.
+        self._pending_start: tuple[datetime, dict[str, Any]] | None = None
+        self._schedule_warnings: dict[str, str] = {}
+        # Every option mutation is a read-modify-write over entry.options.
+        # Without this, two concurrent card actions read the same list and the
+        # second write erases the first.
+        self._options_lock = asyncio.Lock()
 
     @property
     def options(self) -> dict[str, Any]:
@@ -130,6 +139,21 @@ class LightScheduler:
         """Entities that did not confirm their requested state this run."""
         return list(self._run_warnings)
 
+    @property
+    def schedule_warnings(self) -> dict[str, str]:
+        """Reason codes for schedules that need the user's attention.
+
+        Persisted reasons (a selection the zone no longer controls) live on the
+        schedule itself; the ones computed here depend on the calendar and would
+        go stale if stored.
+        """
+        return dict(self._schedule_warnings)
+
+    @property
+    def options_lock(self) -> asyncio.Lock:
+        """Serialize option mutations for this entry."""
+        return self._options_lock
+
     async def async_setup(self) -> None:
         """Restore runtime data and subscribe to scheduler and light activity."""
         stored = await self.store.async_get(self.entry.entry_id)
@@ -146,6 +170,7 @@ class LightScheduler:
     async def async_unload(self) -> None:
         """Cancel all work and leave no active light run behind."""
         self._unloading = True
+        self._pending_start = None
         if self._active:
             await self.async_stop(schedule_next=False)
         for unsub in (
@@ -279,9 +304,13 @@ class LightScheduler:
             self._next_run = None
             self._next_schedule = None
             self._notify(); return
-        upcoming, schedule = find_next_run(
-            self.options.get(CONF_SCHEDULES, []), dt_util.now(), self.enabled
-        )
+        schedules = self.options.get(CONF_SCHEDULES, [])
+        now = dt_util.now()
+        self._schedule_warnings = {
+            schedule_id: WARNING_AMBIGUOUS_TIME
+            for schedule_id in ambiguous_schedule_ids(schedules, now)
+        }
+        upcoming, schedule = find_next_run(schedules, now, self.enabled)
         self._next_run = upcoming
         self._next_schedule = dict(schedule) if schedule else None
         if upcoming is not None:
@@ -307,13 +336,25 @@ class LightScheduler:
         self._next_run = None
         self._next_schedule = None
         if schedule is not None:
+            if self._stopping and not self._unloading:
+                # The shutdown sequence still owns the zone: it holds _active
+                # while it staggers the lights off, which blocks turning on,
+                # blocks extending the off time and blocks adding targets. With
+                # a 300 s interval that window is twenty minutes wide, so the
+                # start is replayed after the stop instead of being lost.
+                self._pending_start = (scheduled_at, dict(schedule))
+                _LOGGER.info(
+                    "Schedule %s in %s fired during the shutdown sequence; "
+                    "it will start as soon as the zone is idle",
+                    schedule.get(CONF_SCHEDULE_ID), self.entry.title,
+                )
+                self._schedule_next()
+                return
             if self._active:
                 candidate_finish = dt_util.as_utc(scheduled_at) + timedelta(
                     seconds=int(schedule[CONF_SCHEDULE_DURATION])
                 )
-                if not self._stopping and (
-                    self._finishes_at is None or candidate_finish > self._finishes_at
-                ):
+                if self._finishes_at is None or candidate_finish > self._finishes_at:
                     self._finishes_at = candidate_finish
                     self._arm_finish_timer()
                     await self._save_runtime(immediate=True)
@@ -402,6 +443,25 @@ class LightScheduler:
             None,
         )
 
+    def _power_threshold_for(self, entity_id: str) -> float:
+        """Return the watts above which this target counts as drawing current.
+
+        The default suits a normal bulb, but a sub-watt LED strip would never
+        confirm turning on against it, paying a pointless resend plus two grace
+        windows on every single run. Each entry can lower or raise it.
+        """
+        for item in self.entity_mappings:
+            if item.get("target_entity_id") != entity_id:
+                continue
+            try:
+                value = float(item.get(CONF_POWER_THRESHOLD))
+            except (TypeError, ValueError):
+                break
+            if value > 0:
+                return value
+            break
+        return DEFAULT_POWER_THRESHOLD_W
+
     def _is_confirmed(self, entity_id: str, expect_on: bool, power_entity_id: str | None) -> bool:
         """Check the entity's own state and, when paired, its power reading.
 
@@ -418,7 +478,7 @@ class LightScheduler:
         watts = read_power_watts(self.hass, power_entity_id)
         if watts is None:
             return True
-        return (watts > POWER_CONFIRM_THRESHOLD_W) == expect_on
+        return (watts > self._power_threshold_for(entity_id)) == expect_on
 
     async def _dispatch(self, entity_id: str, service: str) -> None:
         """Send one turn_on/turn_off call without waiting for confirmation.
@@ -487,6 +547,21 @@ class LightScheduler:
                 service, ", ".join(pending), self.entry.title,
             )
         return pending
+
+    def async_request_turn_on(self, **kwargs: Any) -> None:
+        """Start a run without making the caller wait for the whole ramp.
+
+        The ramp holds the caller for `interval` seconds per light plus up to two
+        15 s confirmation windows -- twenty minutes for five lights at the
+        maximum interval. A service call that blocks that long stalls the script
+        that made it, so the sequence runs in the background and the entities
+        report progress instead.
+        """
+        self._create_background_task(self.async_turn_on(**kwargs))
+
+    def async_request_stop(self, interval: int | None = None) -> None:
+        """Stop a run without making the caller wait for the whole sequence."""
+        self._create_background_task(self.async_stop(interval=interval))
 
     async def async_turn_on(
         self,
@@ -586,6 +661,11 @@ class LightScheduler:
             # A sequence that raised must not leave the zone stuck in
             # "stopping", or no later call could ever turn the lights off.
             self._stopping = False
+        # Outside the finally on purpose: the replayed run must not be started
+        # while this call still owns _stopping and _stop_task, or its own stop
+        # would be reset from under it when this frame unwinds.
+        if self._pending_start is not None:
+            self._create_background_task(self._async_replay_pending_start())
 
     async def _async_stop_sequence(
         self, interval: int | None, *, schedule_next: bool
@@ -598,6 +678,11 @@ class LightScheduler:
             await asyncio.gather(ramp_task, return_exceptions=True)
         interval = self._run_interval if interval is None else interval
         interval = max(0, min(int(interval), MAX_SCHEDULE_INTERVAL))
+        if self._unloading:
+            # Reloading the integration must not wait out a full stagger plus
+            # two grace windows; the lights still get their turn_off, just
+            # without the spacing and without waiting for confirmation.
+            interval = 0
         if self._unsub_finish:
             self._unsub_finish(); self._unsub_finish = None
         self._notify()
@@ -606,11 +691,12 @@ class LightScheduler:
             await self._dispatch(entity_id, "turn_off")
             if interval and index < len(targets) - 1:
                 await asyncio.sleep(interval)
-        self._run_warnings = list(
-            dict.fromkeys(
-                [*self._run_warnings, *await self._confirm_group(targets, "turn_off", False)]
+        if not self._unloading:
+            self._run_warnings = list(
+                dict.fromkeys(
+                    [*self._run_warnings, *await self._confirm_group(targets, "turn_off", False)]
+                )
             )
-        )
         started, source = self._started_at, self._source
         finished = dt_util.utcnow()
         self._history.append({"started_at": started.isoformat() if started else None, "finished_at": finished.isoformat(),
@@ -625,6 +711,37 @@ class LightScheduler:
         await self._save_runtime(immediate=True)
         if schedule_next:
             self._schedule_next()
+
+    async def _async_replay_pending_start(self) -> None:
+        """Start a schedule that fired while this shutdown was running.
+
+        The run keeps the off time the schedule asked for, counted from the
+        moment it was supposed to start -- a shutdown that ate half the window
+        shortens the run instead of pushing the off time an hour later. A
+        schedule whose window closed entirely is reported, not started.
+        """
+        pending, self._pending_start = self._pending_start, None
+        if pending is None or self._unloading or self._active or not self.enabled:
+            return
+        scheduled_at, schedule = pending
+        finish = dt_util.as_utc(scheduled_at) + timedelta(
+            seconds=int(schedule[CONF_SCHEDULE_DURATION])
+        )
+        remaining = int((finish - dt_util.utcnow()).total_seconds())
+        if remaining <= 0:
+            _LOGGER.warning(
+                "Schedule %s in %s was skipped: the shutdown sequence lasted "
+                "past its own off time",
+                schedule.get(CONF_SCHEDULE_ID), self.entry.title,
+            )
+            return
+        await self.async_turn_on(
+            duration=remaining,
+            source=SOURCE_SCHEDULE,
+            interval=int(schedule.get(CONF_SCHEDULE_INTERVAL, 0)),
+            schedule_id=schedule.get(CONF_SCHEDULE_ID),
+            entity_ids=schedule.get(CONF_TARGET_ENTITY_IDS),
+        )
 
     async def _close_external_records(self, entity_ids: list[str]) -> None:
         """Close open external records for lights this run is taking over.
@@ -701,10 +818,16 @@ class LightScheduler:
         self._notify()
 
     async def async_set_enabled(self, enabled: bool) -> None:
-        options = {**self.options, CONF_ENABLED: enabled}
-        self.hass.config_entries.async_update_entry(self.entry, options=options)
-        if not enabled and self._active:
-            await self.async_stop()
+        async with self._options_lock:
+            options = {**self.options, CONF_ENABLED: enabled}
+            self.hass.config_entries.async_update_entry(self.entry, options=options)
+        if not enabled:
+            # Pausing the zone drops a start that was waiting for the shutdown
+            # to finish; otherwise it would fire right after the pause.
+            self._pending_start = None
+            if self._active:
+                # Not awaited: the switch must answer before the stagger.
+                self.async_request_stop()
 
     async def async_options_updated(self) -> None:
         if self._unsub_states:

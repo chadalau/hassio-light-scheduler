@@ -16,7 +16,8 @@
     },
     "error": {
       "no_lights": "Select at least one light or smart plug.",
-      "not_power_sensor": "Select a sensor that measures power (W or kW)."
+      "not_power_sensor": "Select a sensor that measures power (W or kW).",
+      "duplicate_zone": "Another zone already controls exactly these lights."
     }
   },
   "options": {
@@ -36,7 +37,8 @@
     },
     "error": {
       "no_lights": "Select at least one light or smart plug.",
-      "not_power_sensor": "Select a sensor that measures power (W or kW)."
+      "not_power_sensor": "Select a sensor that measures power (W or kW).",
+      "duplicate_zone": "Another zone already controls exactly these lights."
     }
   },
   "entity": {

@@ -17,8 +17,9 @@ CONF_SCHEDULE_TIME = "time"
 CONF_SCHEDULE_DAYS = "days"
 CONF_SCHEDULE_DURATION = "duration"
 CONF_SCHEDULE_INTERVAL = "interval"
+CONF_SCHEDULE_WARNING = "warning"
+CONF_POWER_THRESHOLD = "power_threshold_w"
 
-DEFAULT_ENABLED = True
 DEFAULT_DEFAULT_DURATION = 14400
 DEFAULT_MAX_DURATION = 86400
 MIN_DURATION = 1
@@ -28,10 +29,17 @@ HISTORY_RETENTION_DAYS = 30
 HISTORY_MAX_ENTRIES = 200
 ACTUATION_GRACE = 15
 # Typical idle/standby draw is well under 1 W; anything above is treated as "on".
-POWER_CONFIRM_THRESHOLD_W = 1.0
+# Overridable per entry: a sub-watt LED strip would never confirm turning on
+# against a fixed global threshold.
+DEFAULT_POWER_THRESHOLD_W = 1.0
+MAX_POWER_THRESHOLD_W = 10000.0
 # A device integration that never returns from its service call would
 # otherwise hang the stop sequence, the finish timer and unload forever.
 SERVICE_CALL_TIMEOUT = 30
+# Reason codes persisted on a schedule the integration had to disable on its
+# own, so the card can explain why a row stopped running.
+WARNING_TARGETS_REMOVED = "targets_removed"
+WARNING_AMBIGUOUS_TIME = "ambiguous_time"
 
 SOURCE_SCHEDULE = "schedule"
 SOURCE_MANUAL = "manual"

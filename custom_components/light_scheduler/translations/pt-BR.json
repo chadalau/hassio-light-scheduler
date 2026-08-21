@@ -16,7 +16,8 @@
     },
     "error": {
       "no_lights": "Selecione pelo menos uma luz ou tomada.",
-      "not_power_sensor": "Selecione um sensor que meça potência (W ou kW)."
+      "not_power_sensor": "Selecione um sensor que meça potência (W ou kW).",
+      "duplicate_zone": "Outra zona já controla exatamente estas luzes."
     }
   },
   "options": {
@@ -36,7 +37,8 @@
     },
     "error": {
       "no_lights": "Selecione pelo menos uma luz ou tomada.",
-      "not_power_sensor": "Selecione um sensor que meça potência (W ou kW)."
+      "not_power_sensor": "Selecione um sensor que meça potência (W ou kW).",
+      "duplicate_zone": "Outra zona já controla exatamente estas luzes."
     }
   },
   "entity": {

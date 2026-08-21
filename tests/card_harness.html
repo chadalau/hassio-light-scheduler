@@ -22,9 +22,20 @@
   <body>
     <light-schedule-card id="card"></light-schedule-card>
     <script>
+      // Shaped like the sensor publishes it: what the user configured, plus the
+      // resolved values under their own keys. The second entry has no explicit
+      // name and no explicit sensor, so the dialog must show them as hints.
       const mappings = [
-        { name: "Gavita 3", target_entity_id: "switch.gavita_3", power_entity_id: "sensor.gavita_3_power" },
-        { name: "Gavita 4", target_entity_id: "switch.gavita_4", power_entity_id: "sensor.gavita_4_power" },
+        {
+          name: "Gavita 3", target_entity_id: "switch.gavita_3",
+          power_entity_id: "sensor.gavita_3_power", power_threshold_w: 1,
+          display_name: "Gavita 3", resolved_power_entity_id: "sensor.gavita_3_power",
+        },
+        {
+          name: "", target_entity_id: "switch.gavita_4", power_entity_id: "",
+          power_threshold_w: 1,
+          display_name: "Gavita 4", resolved_power_entity_id: "sensor.gavita_4_power",
+        },
       ];
       let states = {
         "sensor.indoor_next_run": {
@@ -36,9 +47,9 @@
             enabled: true,
             active: false,
             lights_on: 1,
-            total_lights: 2,
             total_power_w: 624.5,
             entity_mappings: mappings,
+            schedule_warnings: { three: "ambiguous_time" },
             lights: [
               { entity_id: "switch.gavita_3", name: "Gavita 3", state: "on", available: true, power_entity_id: "sensor.gavita_3_power", power_w: 624.5 },
               { entity_id: "switch.gavita_4", name: "Gavita 4", state: "off", available: true, power_entity_id: "sensor.gavita_4_power", power_w: 0 },
@@ -46,6 +57,8 @@
             schedules: [
               { id: "one", time: "18:30:00", duration: 14400, interval: 5, days: [0, 1, 2, 3, 4, 5, 6], enabled: true },
               { id: "two", time: "23:00", duration: 3600, interval: 0, days: [0], enabled: false },
+              { id: "three", time: "01:30", duration: 5400, interval: 0, days: [6], enabled: true },
+              { id: "four", time: "06:00", duration: 3600, interval: 0, days: [1], enabled: false, target_entity_ids: [], warning: "targets_removed" },
             ],
           },
         },

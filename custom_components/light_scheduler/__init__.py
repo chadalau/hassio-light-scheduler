@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
+import logging
 from pathlib import Path
 from typing import Any
 
@@ -27,14 +29,18 @@ from .const import (
     CONF_ENABLED,
     CONF_ENTITY_MAPPINGS,
     CONF_POWER_ENTITY_IDS,
+    CONF_POWER_THRESHOLD,
     CONF_SCHEDULE_DAYS,
     CONF_SCHEDULE_DURATION,
     CONF_SCHEDULE_ID,
     CONF_SCHEDULE_INTERVAL,
     CONF_SCHEDULE_TIME,
+    CONF_SCHEDULE_WARNING,
     CONF_SCHEDULES,
     CONF_TARGET_ENTITY_IDS,
+    DEFAULT_POWER_THRESHOLD_W,
     DOMAIN,
+    MAX_POWER_THRESHOLD_W,
     MAX_SCHEDULE_DURATION,
     MAX_SCHEDULE_INTERVAL,
     MIN_DURATION,
@@ -46,11 +52,17 @@ from .const import (
     SERVICE_STOP,
     SERVICE_TURN_ON_NOW,
     SERVICE_UPDATE_SCHEDULE,
+    WARNING_TARGETS_REMOVED,
 )
 from .power import is_power_sensor
-from .schedules import new_schedule
+from .schedules import new_schedule, prune_schedule_targets
 from .scheduler import LightScheduler
 from .store import RuntimeStore
+
+_LOGGER = logging.getLogger(__name__)
+
+# Rebuilds one entry's options from whatever is current, inside its lock.
+_OptionsBuilder = Callable[[dict[str, Any]], dict[str, Any]]
 
 CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
 _TARGET_KEYS = (
@@ -94,6 +106,11 @@ SCHEDULE_SCHEMA = vol.Schema(
             ],
         ),
         vol.Optional(CONF_ENABLED, default=True): cv.boolean,
+        # Set by the integration itself when it has to disable a schedule.
+        # Accepted here only so update() can round-trip an existing row.
+        vol.Optional(CONF_SCHEDULE_WARNING, default=""): vol.In(
+            ("", WARNING_TARGETS_REMOVED)
+        ),
     }
 )
 
@@ -148,9 +165,32 @@ def _normalize_mappings(
                 "name": name,
                 "target_entity_id": target,
                 "power_entity_id": power,
+                CONF_POWER_THRESHOLD: _power_threshold(raw.get(CONF_POWER_THRESHOLD)),
             }
         )
     return result
+
+
+def _power_threshold(value: Any) -> float:
+    """Validate the watts above which an entry counts as drawing current.
+
+    A fixed global threshold makes a sub-watt LED strip fail confirmation on
+    every run, so each entry carries its own.
+    """
+    if value in (None, ""):
+        return DEFAULT_POWER_THRESHOLD_W
+    try:
+        threshold = float(value)
+    except (TypeError, ValueError):
+        raise ServiceValidationError(
+            f"Limiar de potência inválido: {value}"
+        ) from None
+    if not 0 < threshold <= MAX_POWER_THRESHOLD_W:
+        raise ServiceValidationError(
+            "O limiar de potência precisa estar entre 0 e "
+            f"{MAX_POWER_THRESHOLD_W:.0f} W."
+        )
+    return round(threshold, 3)
 
 
 def _assert_targets_in_zone(
@@ -212,6 +252,95 @@ def _find_schedule_or_fail(
     return matches[0]
 
 
+def _with_pruned_schedules(options: dict[str, Any]) -> dict[str, Any]:
+    """Drop lights the zone no longer controls from every schedule.
+
+    A selection is only checked against the zone when the schedule is written.
+    Nothing used to re-check it when the zone itself changed, so removing a
+    light left every schedule narrowed to it resolving to an empty target list
+    -- which never runs, while the card still showed the row as scheduled.
+
+    An emptied selection is deliberately NOT read as "the whole zone": that
+    would widen a schedule the user narrowed on purpose. The row is disabled and
+    flagged so it can explain itself and ask for a new selection.
+    """
+    schedules, disabled = prune_schedule_targets(
+        options.get(CONF_SCHEDULES, []), options.get(CONF_TARGET_ENTITY_IDS, [])
+    )
+    if disabled:
+        _LOGGER.warning(
+            "Disabled %s schedule(s) whose lights left the zone: %s",
+            len(disabled), ", ".join(disabled),
+        )
+    return {**options, CONF_SCHEDULES: schedules}
+
+
+def _patched_schedule(
+    scheduler: LightScheduler, schedule_id: str, patch: dict[str, Any]
+) -> dict[str, Any]:
+    """Return the edited schedule, validated against the zone it belongs to."""
+    current = _find_schedule_or_fail(scheduler, schedule_id)
+    warning = str(current.get(CONF_SCHEDULE_WARNING) or "")
+    if (
+        warning == WARNING_TARGETS_REMOVED
+        and patch.get(CONF_ENABLED)
+        and CONF_TARGET_ENTITY_IDS not in patch
+    ):
+        raise ServiceValidationError(
+            "Este agendamento foi desativado porque as luzes dele saíram da "
+            "zona. Escolha as luzes novamente antes de reativá-lo."
+        )
+    replacement = _validated_schedule(
+        {
+            **current,
+            **patch,
+            CONF_SCHEDULE_ID: schedule_id,
+            # Choosing lights again is what clears the flag; any other edit
+            # leaves the row marked so the user still sees what is wrong.
+            CONF_SCHEDULE_WARNING: (
+                "" if CONF_TARGET_ENTITY_IDS in patch else warning
+            ),
+        }
+    )
+    _assert_targets_in_zone(scheduler, replacement)
+    return replacement
+
+
+def _repaired_mappings(
+    scheduler: LightScheduler, targets: list[str], powers: list[str]
+) -> list[dict[str, Any]]:
+    """Rebuild light-to-power pairs after a flat target/power list edit.
+
+    Pairs the user already made are kept; only the sensors left over are handed
+    out positionally, so editing the target list does not reshuffle everything.
+    """
+    existing = {
+        item.get("target_entity_id"): item for item in scheduler.entity_mappings
+    }
+    retained_powers = {
+        str(item.get("power_entity_id"))
+        for target, item in existing.items()
+        if target in targets and item.get("power_entity_id") in powers
+    }
+    available_powers = [power for power in powers if power not in retained_powers]
+    mappings: list[dict[str, Any]] = []
+    for target in targets:
+        old = existing.get(target, {})
+        old_power = str(old.get("power_entity_id") or "")
+        power = old_power if old_power in powers else ""
+        if not power and available_powers:
+            power = available_powers.pop(0)
+        mappings.append(
+            {
+                "name": str(old.get("name") or ""),
+                "target_entity_id": target,
+                "power_entity_id": power,
+                CONF_POWER_THRESHOLD: old.get(CONF_POWER_THRESHOLD),
+            }
+        )
+    return mappings
+
+
 def _validated_schedule(value: Any) -> dict[str, Any]:
     """Validate service schedule input with a user-facing error."""
     if not isinstance(value, dict):
@@ -265,10 +394,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    """Unload one light zone."""
-    await entry.runtime_data.async_unload()
+    """Unload one light zone.
+
+    The platforms go first: tearing the scheduler down (which turns the running
+    lights off) before knowing whether the entities could be removed would leave
+    a still-loaded entry pointing at a dead scheduler.
+    """
     unloaded = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
-    if unloaded and not hass.config_entries.async_loaded_entries(DOMAIN):
+    if not unloaded:
+        return False
+    await entry.runtime_data.async_unload()
+    if not hass.config_entries.async_loaded_entries(DOMAIN):
         _unregister_services(hass)
         _unregister_frontend(hass)
     return unloaded
@@ -365,11 +501,22 @@ async def _resolve(
     return found
 
 
-async def _update_options(
-    hass: HomeAssistant, scheduler: LightScheduler, options: dict[str, Any]
+async def _apply_options(
+    hass: HomeAssistant,
+    scheduler: LightScheduler,
+    build: _OptionsBuilder,
 ) -> None:
-    """Persist an options change; the config-entry listener applies it."""
-    hass.config_entries.async_update_entry(scheduler.entry, options=options)
+    """Serialize one entry's read-modify-write over its options.
+
+    Every handler used to read ``scheduler.options``, build a new dict and write
+    it back. Two concurrent calls -- two card toggles in the same second -- read
+    the same list and the second write erased the first. ``build`` runs inside
+    the lock and re-reads the current options, so it also gets to re-validate
+    against whatever landed in the meantime.
+    """
+    async with scheduler.options_lock:
+        options = build(scheduler.options)
+        hass.config_entries.async_update_entry(scheduler.entry, options=options)
 
 
 async def _register_services(hass: HomeAssistant) -> None:
@@ -389,16 +536,20 @@ async def _register_services(hass: HomeAssistant) -> None:
             except vol.Invalid as err:
                 raise ServiceValidationError(str(err)) from err
         for scheduler in await _resolve(hass, call):
-            await scheduler.async_turn_on(duration=duration)
+            # Not awaited: the ramp holds for `interval` seconds per light plus
+            # the confirmation windows, which would block the calling script for
+            # up to twenty minutes.
+            scheduler.async_request_turn_on(duration=duration)
 
     async def stop(call: ServiceCall) -> None:
         for scheduler in await _resolve(hass, call):
-            await scheduler.async_stop()
+            scheduler.async_request_stop()
 
     # Every handler below validates all resolved zones BEFORE mutating any of
     # them. Validating inside the apply loop meant a call naming two zones
     # could persist the first and then raise on the second, leaving the caller
-    # with an error and a half-applied change.
+    # with an error and a half-applied change. The same validation runs again
+    # inside each zone's lock, where the options cannot change under it.
 
     async def add(call: ServiceCall) -> None:
         schedule = _validated_schedule(_service_data(call))
@@ -406,33 +557,50 @@ async def _register_services(hass: HomeAssistant) -> None:
         for scheduler in schedulers:
             _assert_targets_in_zone(scheduler, schedule)
             _assert_schedule_id_is_free(scheduler, schedule[CONF_SCHEDULE_ID])
+
+        def build(scheduler: LightScheduler) -> _OptionsBuilder:
+            def apply(options: dict[str, Any]) -> dict[str, Any]:
+                _assert_targets_in_zone(scheduler, schedule)
+                _assert_schedule_id_is_free(scheduler, schedule[CONF_SCHEDULE_ID])
+                return {
+                    **options,
+                    # A fresh copy per zone: sharing one dict across entries
+                    # would alias two independent configurations.
+                    CONF_SCHEDULES: [
+                        *options.get(CONF_SCHEDULES, []),
+                        dict(schedule),
+                    ],
+                }
+
+            return apply
+
         for scheduler in schedulers:
-            options = {
-                **scheduler.options,
-                CONF_SCHEDULES: [
-                    *scheduler.options.get(CONF_SCHEDULES, []),
-                    schedule,
-                ],
-            }
-            await _update_options(hass, scheduler, options)
+            await _apply_options(hass, scheduler, build(scheduler))
 
     async def remove(call: ServiceCall) -> None:
         schedule_id = _service_data(call).get(CONF_SCHEDULE_ID)
         if not isinstance(schedule_id, str) or not schedule_id:
-            raise ServiceValidationError("Campo obrigatório ausente: id")
+            raise ServiceValidationError("Campo obrigatorio ausente: id")
         schedulers = await _resolve(hass, call)
         for scheduler in schedulers:
             _find_schedule_or_fail(scheduler, schedule_id)
+
+        def build(scheduler: LightScheduler) -> _OptionsBuilder:
+            def apply(options: dict[str, Any]) -> dict[str, Any]:
+                _find_schedule_or_fail(scheduler, schedule_id)
+                return {
+                    **options,
+                    CONF_SCHEDULES: [
+                        item
+                        for item in options.get(CONF_SCHEDULES, [])
+                        if item.get(CONF_SCHEDULE_ID) != schedule_id
+                    ],
+                }
+
+            return apply
+
         for scheduler in schedulers:
-            options = {
-                **scheduler.options,
-                CONF_SCHEDULES: [
-                    item
-                    for item in scheduler.options.get(CONF_SCHEDULES, [])
-                    if item.get(CONF_SCHEDULE_ID) != schedule_id
-                ],
-            }
-            await _update_options(hass, scheduler, options)
+            await _apply_options(hass, scheduler, build(scheduler))
 
     async def set_schedules(call: ServiceCall) -> None:
         raw_schedules = _service_data(call).get(CONF_SCHEDULES, [])
@@ -451,18 +619,26 @@ async def _register_services(hass: HomeAssistant) -> None:
         for scheduler in schedulers:
             for schedule in schedules:
                 _assert_targets_in_zone(scheduler, schedule)
+
+        def build(scheduler: LightScheduler) -> _OptionsBuilder:
+            def apply(options: dict[str, Any]) -> dict[str, Any]:
+                for schedule in schedules:
+                    _assert_targets_in_zone(scheduler, schedule)
+                return {
+                    **options,
+                    CONF_SCHEDULES: [dict(schedule) for schedule in schedules],
+                }
+
+            return apply
+
         for scheduler in schedulers:
-            await _update_options(
-                hass,
-                scheduler,
-                {**scheduler.options, CONF_SCHEDULES: schedules},
-            )
+            await _apply_options(hass, scheduler, build(scheduler))
 
     async def update(call: ServiceCall) -> None:
         data = _service_data(call)
         schedule_id = data.pop(CONF_SCHEDULE_ID, None)
         if not isinstance(schedule_id, str) or not schedule_id:
-            raise ServiceValidationError("Campo obrigatório ausente: id")
+            raise ServiceValidationError("Campo obrigatorio ausente: id")
         allowed = {
             CONF_SCHEDULE_TIME,
             CONF_SCHEDULE_DAYS,
@@ -474,7 +650,7 @@ async def _register_services(hass: HomeAssistant) -> None:
         unknown = set(data) - allowed
         if unknown:
             raise ServiceValidationError(
-                f"Campos desconhecidos: {', '.join(sorted(unknown))}"
+                "Campos desconhecidos: " + ", ".join(sorted(unknown))
             )
         patch = {key: value for key, value in data.items() if key in allowed}
         if not patch:
@@ -482,30 +658,26 @@ async def _register_services(hass: HomeAssistant) -> None:
                 "Informe pelo menos um campo para alterar o agendamento."
             )
         schedulers = await _resolve(hass, call)
-        updated: list[tuple[LightScheduler, dict[str, Any]]] = []
         for scheduler in schedulers:
-            current = _find_schedule_or_fail(scheduler, schedule_id)
-            replacement = _validated_schedule({
-                **current,
-                **patch,
-                CONF_SCHEDULE_ID: schedule_id,
-            })
-            _assert_targets_in_zone(scheduler, replacement)
-            updated.append((scheduler, replacement))
-        for scheduler, replacement in updated:
-            await _update_options(
-                hass,
-                scheduler,
-                {
-                    **scheduler.options,
+            _patched_schedule(scheduler, schedule_id, patch)
+
+        def build(scheduler: LightScheduler) -> _OptionsBuilder:
+            def apply(options: dict[str, Any]) -> dict[str, Any]:
+                replacement = _patched_schedule(scheduler, schedule_id, patch)
+                return {
+                    **options,
                     CONF_SCHEDULES: [
                         replacement
                         if item.get(CONF_SCHEDULE_ID) == schedule_id
                         else item
-                        for item in scheduler.options.get(CONF_SCHEDULES, [])
+                        for item in options.get(CONF_SCHEDULES, [])
                     ],
-                },
-            )
+                }
+
+            return apply
+
+        for scheduler in schedulers:
+            await _apply_options(hass, scheduler, build(scheduler))
 
     async def set_options(call: ServiceCall) -> None:
         data = _service_data(call)
@@ -518,75 +690,58 @@ async def _register_services(hass: HomeAssistant) -> None:
         unknown = set(data) - allowed
         if unknown:
             raise ServiceValidationError(
-                f"Campos desconhecidos: {', '.join(sorted(unknown))}"
+                "Campos desconhecidos: " + ", ".join(sorted(unknown))
             )
         if not data:
             raise ServiceValidationError(
-                "Informe pelo menos uma opção para alterar a zona."
+                "Informe pelo menos uma opcao para alterar a zona."
             )
-        for scheduler in await _resolve(hass, call):
-            options = dict(scheduler.options)
-            if CONF_ENTITY_MAPPINGS in data:
-                mappings = _normalize_mappings(hass, data[CONF_ENTITY_MAPPINGS])
-                options[CONF_ENTITY_MAPPINGS] = mappings
-                options[CONF_TARGET_ENTITY_IDS] = [
-                    item["target_entity_id"] for item in mappings
-                ]
-                options[CONF_POWER_ENTITY_IDS] = [
-                    item["power_entity_id"]
-                    for item in mappings
-                    if item["power_entity_id"]
-                ]
-            elif CONF_TARGET_ENTITY_IDS in data or CONF_POWER_ENTITY_IDS in data:
-                targets = _normalize_entity_ids(
-                    data.get(CONF_TARGET_ENTITY_IDS, scheduler.target_entity_ids),
-                    ("light", "switch"),
-                    required=True,
-                )
-                powers = _normalize_entity_ids(
-                    data.get(CONF_POWER_ENTITY_IDS, scheduler.power_entity_ids),
-                    ("sensor",),
-                )
-                existing = {
-                    item.get("target_entity_id"): item
-                    for item in scheduler.entity_mappings
-                }
-                retained_powers = {
-                    str(item.get("power_entity_id"))
-                    for target, item in existing.items()
-                    if target in targets and item.get("power_entity_id") in powers
-                }
-                available_powers = [
-                    power for power in powers if power not in retained_powers
-                ]
-                mappings = []
-                for target in targets:
-                    old = existing.get(target, {})
-                    old_power = str(old.get("power_entity_id") or "")
-                    power = old_power if old_power in powers else ""
-                    if not power and available_powers:
-                        power = available_powers.pop(0)
-                    mappings.append({
-                        "name": str(old.get("name") or ""),
-                        "target_entity_id": target,
-                        "power_entity_id": power,
-                    })
-                mappings = _normalize_mappings(hass, mappings)
-                options[CONF_ENTITY_MAPPINGS] = mappings
-                options[CONF_TARGET_ENTITY_IDS] = targets
-                options[CONF_POWER_ENTITY_IDS] = [
-                    item["power_entity_id"] for item in mappings
-                    if item["power_entity_id"]
-                ]
-            if CONF_DEFAULT_DURATION in data:
-                try:
-                    options[CONF_DEFAULT_DURATION] = vol.All(
-                        vol.Coerce(int),
-                        vol.Range(min=MIN_DURATION, max=MAX_SCHEDULE_DURATION),
-                    )(data[CONF_DEFAULT_DURATION])
-                except vol.Invalid as err:
-                    raise ServiceValidationError(str(err)) from err
-            await _update_options(hass, scheduler, options)
+        schedulers = await _resolve(hass, call)
+
+        def build(scheduler: LightScheduler) -> _OptionsBuilder:
+            def apply(current: dict[str, Any]) -> dict[str, Any]:
+                options = dict(current)
+                if CONF_ENTITY_MAPPINGS in data:
+                    mappings = _normalize_mappings(hass, data[CONF_ENTITY_MAPPINGS])
+                elif CONF_TARGET_ENTITY_IDS in data or CONF_POWER_ENTITY_IDS in data:
+                    targets = _normalize_entity_ids(
+                        data.get(CONF_TARGET_ENTITY_IDS, scheduler.target_entity_ids),
+                        ("light", "switch"),
+                        required=True,
+                    )
+                    powers = _normalize_entity_ids(
+                        data.get(CONF_POWER_ENTITY_IDS, scheduler.power_entity_ids),
+                        ("sensor",),
+                    )
+                    mappings = _normalize_mappings(
+                        hass, _repaired_mappings(scheduler, targets, powers)
+                    )
+                else:
+                    mappings = None
+                if mappings is not None:
+                    options[CONF_ENTITY_MAPPINGS] = mappings
+                    options[CONF_TARGET_ENTITY_IDS] = [
+                        item["target_entity_id"] for item in mappings
+                    ]
+                    options[CONF_POWER_ENTITY_IDS] = [
+                        item["power_entity_id"]
+                        for item in mappings
+                        if item["power_entity_id"]
+                    ]
+                if CONF_DEFAULT_DURATION in data:
+                    try:
+                        options[CONF_DEFAULT_DURATION] = vol.All(
+                            vol.Coerce(int),
+                            vol.Range(min=MIN_DURATION, max=MAX_SCHEDULE_DURATION),
+                        )(data[CONF_DEFAULT_DURATION])
+                    except vol.Invalid as err:
+                        raise ServiceValidationError(str(err)) from err
+                return _with_pruned_schedules(options)
+
+            return apply
+
+        for scheduler in schedulers:
+            await _apply_options(hass, scheduler, build(scheduler))
 
     handlers = (
         (SERVICE_TURN_ON_NOW, turn_on),
