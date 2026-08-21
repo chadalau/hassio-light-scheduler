@@ -196,6 +196,41 @@ class PruneHistoryTests(unittest.TestCase):
         self.assertEqual(1, len(self._prune([{"started_at": _now_iso()}])))
 
 
+class LastFinishedAtTests(unittest.TestCase):
+    """The inactive header timeline starts at the last scheduler shutdown."""
+
+    def test_returns_latest_owned_run_completion(self) -> None:
+        scheduler, _ = make_scheduler(SCHEDULER, {}, zone("light.a"))
+        older = datetime.now(UTC) - timedelta(hours=3)
+        latest = datetime.now(UTC) - timedelta(minutes=1)
+        scheduler._history = [
+            {"finished_at": older.isoformat(), "source": "schedule"},
+            {"finished_at": latest.isoformat(), "source": "manual"},
+        ]
+
+        self.assertEqual(latest, scheduler.last_finished_at)
+
+    def test_ignores_external_activity(self) -> None:
+        scheduler, _ = make_scheduler(SCHEDULER, {}, zone("light.a"))
+        owned = datetime.now(UTC) - timedelta(hours=2)
+        external = datetime.now(UTC) - timedelta(minutes=1)
+        scheduler._history = [
+            {"finished_at": owned.isoformat(), "source": "schedule"},
+            {"finished_at": external.isoformat(), "source": "external"},
+        ]
+
+        self.assertEqual(owned, scheduler.last_finished_at)
+
+    def test_returns_none_without_a_valid_owned_completion(self) -> None:
+        scheduler, _ = make_scheduler(SCHEDULER, {}, zone("light.a"))
+        scheduler._history = [
+            {"finished_at": "invalid", "source": "schedule"},
+            {"finished_at": _now_iso(), "source": "external"},
+        ]
+
+        self.assertIsNone(scheduler.last_finished_at)
+
+
 class ExternalRecordTests(unittest.TestCase):
     """An external record left open across a run reported a bogus duration.
 

@@ -50,6 +50,7 @@
             source: "schedule",
             started_at: new Date(Date.now() - 11.5 * 60 * 60 * 1000).toISOString(),
             finishes_at: new Date(Date.now() + 30 * 60 * 1000).toISOString(),
+            last_finished_at: new Date(Date.now() - 60 * 1000).toISOString(),
             lights_on: demoActive ? 1 : 0,
             total_power_w: demoActive ? 624.5 : 0,
             entity_mappings: mappings,

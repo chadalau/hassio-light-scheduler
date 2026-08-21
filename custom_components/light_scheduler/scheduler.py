@@ -154,6 +154,31 @@ class LightScheduler:
         return self._finishes_at
 
     @property
+    def last_finished_at(self) -> datetime | None:
+        """Return the most recent run completion owned by this scheduler.
+
+        External light activity is intentionally excluded: the header timeline
+        represents the zone's automation cycle, not an unrelated manual toggle
+        reported by Home Assistant.
+        """
+        latest: datetime | None = None
+        for item in self._history:
+            if item.get("source") == SOURCE_EXTERNAL:
+                continue
+            raw_finished = item.get("finished_at")
+            finished = (
+                dt_util.parse_datetime(raw_finished)
+                if isinstance(raw_finished, str)
+                else None
+            )
+            if not finished:
+                continue
+            finished_utc = dt_util.as_utc(finished)
+            if latest is None or finished_utc > latest:
+                latest = finished_utc
+        return latest
+
+    @property
     def history(self) -> list[dict[str, Any]]:
         return self._history
 

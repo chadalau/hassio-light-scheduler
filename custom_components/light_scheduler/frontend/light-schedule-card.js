@@ -1,4 +1,4 @@
-const CARD_VERSION = "0.8.4";
+const CARD_VERSION = "0.8.5";
 
 class LightScheduleCard extends HTMLElement {
   constructor() {
@@ -1041,11 +1041,19 @@ class LightScheduleCard extends HTMLElement {
     }
 
     const remaining = Math.max(0, target - Date.now());
-    const day = 24 * 60 * 60 * 1000;
-    const start = active ? Date.parse(attrs.started_at || "") : Number.NaN;
+    const start = Date.parse(
+      active ? attrs.started_at || "" : attrs.last_finished_at || ""
+    );
     const duration = Number.isFinite(start) && target > start
       ? target - start
-      : Math.max(day, remaining);
+      : Number.NaN;
+    if (!Number.isFinite(duration)) {
+      return {
+        text: `${this._formatCountdown(remaining)} até ${action}`,
+        label: `Tempo até ${action}`,
+        progress: 0,
+      };
+    }
     const elapsed = Math.max(0, Math.min(duration, duration - remaining));
     const progress = Math.round((elapsed / Math.max(1, duration)) * 1000) / 10;
     return {
@@ -1122,7 +1130,17 @@ class LightScheduleCard extends HTMLElement {
           --scheduler-state-neutral: var(--secondary-text-color, #a0a0a0);
         }
         * { box-sizing: border-box; }
-        ha-card { display: block; overflow: hidden; color: var(--primary-text-color); background: var(--ha-card-background, var(--card-background-color)); }
+        ha-card {
+          display: block;
+          overflow: hidden;
+          color: var(--primary-text-color);
+          background: var(--ha-card-background, var(--card-background-color));
+          --ha-card-border-color: rgba(var(--scheduler-header-accent-rgb), .42);
+        }
+        ha-card:not(:defined) {
+          border: 1px solid var(--ha-card-border-color);
+          border-radius: var(--ha-card-border-radius, 12px);
+        }
         button, input, select { font: inherit; }
         button { color: inherit; }
         .shell { --shell-inline: 14px; padding: 12px var(--shell-inline) 13px; }
@@ -1133,8 +1151,6 @@ class LightScheduleCard extends HTMLElement {
           margin: -12px calc(-1 * var(--shell-inline)) 0;
           padding: 15px 20px 13px;
           overflow: hidden;
-          border: 1px solid rgba(var(--scheduler-header-accent-rgb), .42);
-          border-radius: var(--ha-card-border-radius, 12px) var(--ha-card-border-radius, 12px) 0 0;
           background:
             radial-gradient(circle at 0 0, rgba(var(--scheduler-header-accent-rgb), .12), transparent 42%),
             linear-gradient(115deg, rgba(var(--scheduler-header-accent-rgb), .055), rgba(127, 127, 127, .025) 48%, transparent 78%);
