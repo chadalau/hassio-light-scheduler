@@ -37,21 +37,25 @@
           display_name: "Gavita 4", resolved_power_entity_id: "sensor.gavita_4_power",
         },
       ];
+      const demoActive = new URLSearchParams(window.location.search).get("active") !== "false";
       let states = {
         "sensor.indoor_next_run": {
           entity_id: "sensor.indoor_next_run",
-          state: "2026-08-14T18:30:00-03:00",
+          state: new Date(Date.now() + 90 * 60 * 1000).toISOString(),
           attributes: {
             entry_id: "indoor-entry",
             zone_name: "Indoor",
             enabled: true,
-            active: false,
-            lights_on: 1,
-            total_power_w: 624.5,
+            active: demoActive,
+            source: "schedule",
+            started_at: new Date(Date.now() - 11.5 * 60 * 60 * 1000).toISOString(),
+            finishes_at: new Date(Date.now() + 30 * 60 * 1000).toISOString(),
+            lights_on: demoActive ? 1 : 0,
+            total_power_w: demoActive ? 624.5 : 0,
             entity_mappings: mappings,
             schedule_warnings: { three: "ambiguous_time" },
             lights: [
-              { entity_id: "switch.gavita_3", name: "Gavita 3", state: "on", available: true, power_entity_id: "sensor.gavita_3_power", power_w: 624.5 },
+              { entity_id: "switch.gavita_3", name: "Gavita 3", state: demoActive ? "on" : "off", available: true, power_entity_id: "sensor.gavita_3_power", power_w: demoActive ? 624.5 : 0 },
               { entity_id: "switch.gavita_4", name: "Gavita 4", state: "off", available: true, power_entity_id: "sensor.gavita_4_power", power_w: 0 },
             ],
             schedules: [

@@ -1,4 +1,4 @@
-const CARD_VERSION = "0.8.2";
+const CARD_VERSION = "0.8.3";
 
 class LightScheduleCard extends HTMLElement {
   constructor() {
@@ -97,16 +97,13 @@ class LightScheduleCard extends HTMLElement {
     const lights = Array.isArray(attrs.lights) ? attrs.lights : [];
     const schedules = Array.isArray(attrs.schedules) ? attrs.schedules : [];
     const enabled = attrs.enabled !== false;
-    const active = Boolean(attrs.active);
     const onCount = Math.max(0, Math.round(this._number(attrs.lights_on)));
     const total = lights.length;
     const power = this._number(attrs.total_power_w);
     const zoneName = attrs.zone_name || attrs.friendly_name || "Sala";
-    const headerProgress = total > 0
-      ? Math.max(0, Math.min(100, Math.round((onCount / total) * 100)))
-      : 0;
     const statusIcon = enabled ? "mdi:calendar-check-outline" : "mdi:calendar-remove-outline";
     const statusTitle = enabled ? "Agendamento ativo" : "Agendamento pausado";
+    const headerTiming = this._headerTiming(attrs, state.state);
 
     this.shadowRoot.innerHTML = `
       ${this._styles()}
@@ -146,7 +143,7 @@ class LightScheduleCard extends HTMLElement {
             <div class="hero-summary">
               <div class="hero-kpi">
                 <strong>${onCount} de ${total} ${total === 1 ? "luz ligada" : "luzes ligadas"}</strong>
-                <span><ha-icon icon="mdi:clock-outline"></ha-icon>Próxima ação: ${this._escape(this._formatNext(attrs, state.state))}</span>
+                <span class="hero-countdown" data-header-countdown>${this._escape(headerTiming.text)}</span>
               </div>
               <div class="hero-secondary">
                 <span>Potência total</span>
@@ -154,12 +151,10 @@ class LightScheduleCard extends HTMLElement {
               </div>
             </div>
 
-            <div class="hero-rail" role="progressbar" aria-label="Proporção de luzes ligadas" aria-valuemin="0" aria-valuemax="${this._escape(total || 1)}" aria-valuenow="${this._escape(onCount)}">
-              <span style="width: ${this._escape(headerProgress)}%"></span>
+            <div class="hero-timeline" role="progressbar" aria-label="${this._escape(headerTiming.label)}" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${this._escape(Math.round(headerTiming.progress))}" aria-valuetext="${this._escape(headerTiming.text)}" data-header-progress>
+              <span style="width: ${this._escape(headerTiming.progress)}%" data-header-progress-fill></span>
             </div>
           </header>
-
-          ${active ? this._activeRun(attrs) : ""}
 
           <div class="divider"></div>
           <h3>Luzes da sala</h3>
@@ -183,27 +178,6 @@ class LightScheduleCard extends HTMLElement {
 
     this._syncTimer();
     this._tick();
-  }
-
-  _activeRun(attrs) {
-    const stopping = Boolean(attrs.stopping);
-    const source = stopping
-      ? "Desligando em sequência"
-      : attrs.source === "manual"
-        ? "Acionamento manual"
-        : `Ligada desde ${this._formatClock(attrs.started_at)}`;
-    return `
-      <div class="run-status">
-        <div class="run-line">
-          <span><i></i>${this._escape(source)}</span>
-          <span class="countdown" data-countdown>--:--:-- restantes</span>
-        </div>
-        <div class="run-controls">
-          <div class="progress"><span data-progress></span></div>
-          <button type="button" data-action="stop-now" ${stopping ? "disabled" : ""}><ha-icon icon="mdi:stop"></ha-icon>${stopping ? "Desligando" : "Desligar"}</button>
-        </div>
-      </div>
-    `;
   }
 
   _lightTile(light) {
@@ -1032,9 +1006,10 @@ class LightScheduleCard extends HTMLElement {
 
   _syncTimer() {
     const attrs = this._state?.attributes || {};
-    const active = Boolean(attrs.active && attrs.finishes_at);
-    if (active && !this._timer) this._timer = window.setInterval(() => this._tick(), 1000);
-    if (!active) this._clearTimer();
+    const target = attrs.active ? attrs.finishes_at : this._state?.state;
+    const hasTarget = Number.isFinite(Date.parse(target || ""));
+    if (hasTarget && !this._timer) this._timer = window.setInterval(() => this._tick(), 1000);
+    if (!hasTarget) this._clearTimer();
   }
 
   _clearTimer() {
@@ -1044,40 +1019,40 @@ class LightScheduleCard extends HTMLElement {
 
   _tick() {
     const attrs = this._state?.attributes || {};
-    const end = Date.parse(attrs.finishes_at || "");
-    const start = Date.parse(attrs.started_at || "");
-    if (!Number.isFinite(end)) return;
-    const remaining = Math.max(0, end - Date.now());
-    const countdown = this.shadowRoot.querySelector("[data-countdown]");
-    if (attrs.stopping) {
-      if (countdown) countdown.textContent = "desligando…";
-      const stoppingProgress = this.shadowRoot.querySelector("[data-progress]");
-      if (stoppingProgress) stoppingProgress.style.width = "100%";
-      return;
-    }
-    if (countdown) countdown.textContent = `${this._formatCountdown(remaining)} restantes`;
-    const progress = this.shadowRoot.querySelector("[data-progress]");
+    const timing = this._headerTiming(attrs, this._state?.state);
+    const countdown = this.shadowRoot.querySelector("[data-header-countdown]");
+    if (countdown) countdown.textContent = timing.text;
+    const progress = this.shadowRoot.querySelector("[data-header-progress]");
     if (progress) {
-      const duration = Math.max(1, end - start);
-      const elapsed = Math.max(0, Math.min(duration, Date.now() - start));
-      progress.style.width = `${(elapsed / duration) * 100}%`;
+      progress.setAttribute("aria-label", timing.label);
+      progress.setAttribute("aria-valuenow", String(Math.round(timing.progress)));
+      progress.setAttribute("aria-valuetext", timing.text);
     }
+    const fill = this.shadowRoot.querySelector("[data-header-progress-fill]");
+    if (fill) fill.style.width = `${timing.progress}%`;
   }
 
-  _formatNext(attrs, sensorState) {
-    if (attrs.active && attrs.finishes_at) return `desligar às ${this._formatClock(attrs.finishes_at)}`;
-    // The next start is the sensor's own state, an ISO timestamp.
-    const next = Number.isNaN(new Date(sensorState).getTime()) ? null : sensorState;
-    if (!next) return "nenhuma ação programada";
-    const date = new Date(next);
-    if (Number.isNaN(date.getTime())) return String(next);
-    const now = new Date();
-    const tomorrow = new Date(now);
-    tomorrow.setDate(now.getDate() + 1);
-    const timeZone = this._hass?.config?.time_zone;
-    const dateKey = (value) => value.toLocaleDateString("en-CA", { timeZone, year: "numeric", month: "2-digit", day: "2-digit" });
-    const prefix = dateKey(date) === dateKey(now) ? "hoje" : dateKey(date) === dateKey(tomorrow) ? "amanhã" : date.toLocaleDateString("pt-BR", { weekday: "long", timeZone });
-    return `${prefix}, ${date.toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit", timeZone })}`;
+  _headerTiming(attrs, sensorState) {
+    const active = Boolean(attrs.active);
+    const action = active ? "desligar" : "ligar";
+    const target = Date.parse(active ? attrs.finishes_at : sensorState);
+    if (!Number.isFinite(target)) {
+      return { text: `--:-- até ${action}`, label: `Tempo até ${action}`, progress: 0 };
+    }
+
+    const remaining = Math.max(0, target - Date.now());
+    const day = 24 * 60 * 60 * 1000;
+    const start = active ? Date.parse(attrs.started_at || "") : Number.NaN;
+    const duration = Number.isFinite(start) && target > start
+      ? target - start
+      : Math.max(day, remaining);
+    const elapsed = Math.max(0, Math.min(duration, duration - remaining));
+    const progress = Math.round((elapsed / Math.max(1, duration)) * 1000) / 10;
+    return {
+      text: `${this._formatCountdown(remaining)} até ${action}`,
+      label: `Tempo até ${action}`,
+      progress,
+    };
   }
 
   _formatDuration(seconds) {
@@ -1103,17 +1078,10 @@ class LightScheduleCard extends HTMLElement {
   }
 
   _formatCountdown(milliseconds) {
-    const total = Math.max(0, Math.floor(milliseconds / 1000));
-    const hours = Math.floor(total / 3600);
-    const minutes = Math.floor((total % 3600) / 60);
-    const seconds = total % 60;
-    return [hours, minutes, seconds].map((value) => String(value).padStart(2, "0")).join(":");
-  }
-
-  _formatClock(value) {
-    const date = new Date(value);
-    if (Number.isNaN(date.getTime())) return "--:--";
-    return date.toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit", timeZone: this._hass?.config?.time_zone });
+    const totalMinutes = Math.max(0, Math.ceil(milliseconds / 60_000));
+    const hours = Math.floor(totalMinutes / 60);
+    const minutes = totalMinutes % 60;
+    return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}`;
   }
 
   _number(value) {
@@ -1208,24 +1176,12 @@ class LightScheduleCard extends HTMLElement {
         .hero-summary { position: relative; z-index: 1; margin-top: 14px; display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: end; gap: 18px; }
         .hero-kpi { min-width: 0; }
         .hero-kpi strong { display: block; overflow: hidden; color: var(--primary-text-color); font-size: 22px; line-height: 1.08; font-weight: 750; letter-spacing: -.4px; text-overflow: ellipsis; white-space: nowrap; }
-        .hero-kpi span { min-width: 0; margin-top: 6px; display: flex; align-items: center; gap: 5px; overflow: hidden; color: var(--secondary-text-color); font-size: 10px; line-height: 1.2; text-overflow: ellipsis; white-space: nowrap; }
-        .hero-kpi ha-icon { --mdc-icon-size: 13px; flex: none; color: var(--scheduler-header-accent); }
+        .hero-countdown { display: block; margin-top: 6px; overflow: hidden; color: var(--secondary-text-color); font-size: 10px; line-height: 1.2; text-overflow: ellipsis; white-space: nowrap; }
         .hero-secondary { min-width: 88px; text-align: right; }
         .hero-secondary span { display: block; color: var(--secondary-text-color); font-size: 9px; line-height: 1.2; letter-spacing: .35px; text-transform: uppercase; }
         .hero-secondary strong { display: block; margin-top: 3px; color: var(--primary-text-color); font-size: 20px; line-height: 1; letter-spacing: -.25px; }
-        .hero-rail { position: relative; z-index: 1; height: 3px; margin-top: 12px; overflow: hidden; border-radius: 999px; background: rgba(127,127,127,.18); }
-        .hero-rail span { display: block; height: 100%; border-radius: inherit; background: linear-gradient(90deg, rgba(var(--scheduler-header-accent-rgb), .55), var(--scheduler-header-accent)); box-shadow: 0 0 8px rgba(var(--scheduler-header-accent-rgb), .35); transition: width .25s ease; }
-        .run-status { margin: 10px 6px 0; }
-        .run-line { display: flex; align-items: center; justify-content: space-between; gap: 10px; color: var(--secondary-text-color); font-size: 10px; }
-        .run-line span:first-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-        .run-line i { display: inline-block; width: 7px; height: 7px; margin-right: 5px; border-radius: 50%; background: var(--ls-green); }
-        .run-line .countdown { color: var(--ls-blue); white-space: nowrap; }
-        .run-controls { margin-top: 7px; display: grid; grid-template-columns: minmax(0,1fr) 88px; align-items: center; gap: 10px; }
-        .progress { height: 6px; border-radius: 999px; overflow: hidden; background: rgba(127,127,127,.28); }
-        .progress span { display: block; height: 100%; border-radius: inherit; background: var(--ls-blue); }
-        .run-controls button { height: 31px; display: inline-flex; align-items: center; justify-content: center; gap: 6px; border: 1px solid rgba(127,127,127,.32); border-radius: 5px; background: transparent; color: var(--ls-blue); font-size: 11px; cursor: pointer; }
-        .run-controls button:disabled { opacity: .6; cursor: default; }
-        .run-controls ha-icon { --mdc-icon-size: 13px; }
+        .hero-timeline { position: relative; z-index: 1; height: 4px; margin-top: 12px; overflow: hidden; border-radius: 999px; background: rgba(127,127,127,.26); }
+        .hero-timeline span { display: block; height: 100%; border-radius: inherit; background: var(--scheduler-header-accent); box-shadow: 0 0 8px rgba(var(--scheduler-header-accent-rgb), .32); transition: width .25s linear; }
         .divider { height: 1px; margin: 10px 6px 9px; background: rgba(127,127,127,.16); }
         .section-divider { margin-top: 11px; }
         .lights-grid { display: grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap: 6px; }
@@ -1384,9 +1340,6 @@ class LightScheduleCard extends HTMLElement {
           .power-pill { display: none; }
           .schedule-row { grid-template-columns: 26px 16px 84px auto minmax(0,1fr) 22px 22px; padding-inline: 6px; gap: 4px; }
         }
-        @media (prefers-reduced-motion: reduce) {
-          .hero-rail span { transition: none; }
-        }
         @media (max-width: 560px) {
           .mapping-header { display: none; }
           .mapping-row { grid-template-columns: 24px minmax(0,1fr) minmax(0,1fr) 28px; }
@@ -1395,6 +1348,9 @@ class LightScheduleCard extends HTMLElement {
           .mapping-row .entity-autocomplete:first-of-type { grid-column: 2; }
           .mapping-row .entity-autocomplete:last-of-type { grid-column: 3; }
           .remove-mapping-button { grid-column: 4; grid-row: 1 / 3; }
+        }
+        @media (prefers-reduced-motion: reduce) {
+          .hero-timeline span { transition: none; }
         }
       </style>
     `;
