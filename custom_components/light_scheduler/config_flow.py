@@ -5,14 +5,10 @@ from __future__ import annotations
 from typing import Any
 
 import voluptuous as vol
-
 from homeassistant import config_entries
 from homeassistant.config_entries import ConfigEntry, ConfigFlowResult
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import selector
-
-from .power import is_power_sensor
-from .schedules import prune_schedule_targets
 
 from .const import (
     CONF_DEFAULT_DURATION,
@@ -28,6 +24,9 @@ from .const import (
     DEFAULT_MAX_DURATION,
     DOMAIN,
 )
+from .power import is_power_sensor
+from .schedules import prune_schedule_targets
+from .zones import newly_shared_entities, zone_targets
 
 
 def _entity_list(value: Any) -> list[str]:
@@ -181,6 +180,10 @@ class LightSchedulerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 errors[CONF_POWER_ENTITY_IDS] = "not_power_sensor"
             elif _duplicate_zone(list(self._async_current_entries()), targets):
                 errors[CONF_TARGET_ENTITY_IDS] = "duplicate_zone"
+            elif newly_shared_entities(
+                zone_targets(self._async_current_entries()), [], targets
+            ):
+                errors[CONF_TARGET_ENTITY_IDS] = "overlapping_zone"
             else:
                 name = str(user_input[CONF_NAME]).strip()
                 return self.async_create_entry(
@@ -233,6 +236,13 @@ class LightSchedulerOptionsFlow(config_entries.OptionsFlow):
                 self.config_entry.entry_id,
             ):
                 errors[CONF_TARGET_ENTITY_IDS] = "duplicate_zone"
+            elif newly_shared_entities(
+                zone_targets(self.hass.config_entries.async_entries(DOMAIN)),
+                self.config_entry.options.get(CONF_TARGET_ENTITY_IDS, []),
+                targets,
+                self.config_entry.entry_id,
+            ):
+                errors[CONF_TARGET_ENTITY_IDS] = "overlapping_zone"
             if errors:
                 return self.async_show_form(
                     step_id="init", data_schema=_schema(user_input), errors=errors

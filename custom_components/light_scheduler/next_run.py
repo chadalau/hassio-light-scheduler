@@ -1,6 +1,7 @@
 """Pure, timezone-safe helpers for scheduling light groups."""
 from __future__ import annotations
-from datetime import datetime, time, timedelta, timezone
+
+from datetime import UTC, datetime, time, timedelta
 from typing import Any
 
 # How many days ahead an occurrence is searched for. Seven would already cover
@@ -18,7 +19,7 @@ def _parse_time(value: Any) -> time | None:
 
 def _exists(candidate: datetime) -> bool:
     if candidate.tzinfo is None: return True
-    roundtrip = candidate.astimezone(timezone.utc).astimezone(candidate.tzinfo)
+    roundtrip = candidate.astimezone(UTC).astimezone(candidate.tzinfo)
     return roundtrip.replace(fold=0) == candidate or roundtrip.replace(fold=1) == candidate
 
 
@@ -49,7 +50,7 @@ def _occurrences(
         or schedule_time is None
     ):
         return []
-    current = now.astimezone(timezone.utc) if now.tzinfo else now
+    current = now.astimezone(UTC) if now.tzinfo else now
     found: list[datetime] = []
     for offset in range(SEARCH_DAYS):
         date = (now + timedelta(days=offset)).date()
@@ -62,7 +63,7 @@ def _occurrences(
         candidate = datetime.combine(date, schedule_time, tzinfo=now.tzinfo).replace(
             fold=0
         )
-        instant = candidate.astimezone(timezone.utc) if candidate.tzinfo else candidate
+        instant = candidate.astimezone(UTC) if candidate.tzinfo else candidate
         if not _exists(candidate) or instant <= current:
             continue
         found.append(candidate)
@@ -70,7 +71,7 @@ def _occurrences(
 
 
 def _instant(value: datetime) -> datetime:
-    return value.astimezone(timezone.utc) if value.tzinfo else value
+    return value.astimezone(UTC) if value.tzinfo else value
 
 
 def find_next_run(schedules: list[dict[str, Any]], now: datetime, enabled: bool = True) -> tuple[datetime | None, dict[str, Any] | None]:

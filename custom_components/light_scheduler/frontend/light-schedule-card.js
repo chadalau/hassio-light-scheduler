@@ -1,4 +1,4 @@
-const CARD_VERSION = "0.8.0";
+const CARD_VERSION = "0.8.1";
 
 class LightScheduleCard extends HTMLElement {
   constructor() {
@@ -419,6 +419,9 @@ class LightScheduleCard extends HTMLElement {
     const value = selected ? selectedChoice?.label || selected : "";
     const field = kind === "target" ? "mapping_target" : "mapping_power";
     const label = kind === "target" ? "Luz ou interruptor" : "Potência";
+    // Carries a friendly_name, i.e. text an integration or another user chose.
+    // It is escaped at the interpolation below, like every other dynamic value
+    // in this file; the literal placeholders used to make that easy to forget.
     const resolvedChoice = resolved ? choices.find((choice) => choice.id === resolved) : null;
     const placeholder = kind === "target"
       ? "Digite para buscar luz…"
@@ -429,7 +432,7 @@ class LightScheduleCard extends HTMLElement {
       <div class="entity-autocomplete" data-autocomplete data-kind="${kind}">
         <input class="autocomplete-input" type="search" autocomplete="off" spellcheck="false"
           data-autocomplete-input data-field="${field}" data-selected-id="${this._escape(selected)}"
-          value="${this._escape(value)}" placeholder="${placeholder}"
+          value="${this._escape(value)}" placeholder="${this._escape(placeholder)}"
           aria-label="${label} da entrada ${index + 1}" aria-expanded="false">
         <div class="autocomplete-menu" data-autocomplete-menu hidden></div>
       </div>

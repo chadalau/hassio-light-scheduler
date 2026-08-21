@@ -7,8 +7,8 @@ reintroduces one fails here rather than in someone's living room.
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timedelta, timezone
 import unittest
+from datetime import UTC, datetime, timedelta
 
 from ha_stubs import FakeState, load_scheduler, make_scheduler
 
@@ -87,7 +87,7 @@ class ExtendTargetsTests(unittest.TestCase):
         self.scheduler.store = FakeStore()
         self.scheduler._active = True
         self.scheduler._run_targets = ["light.a", "light.b"]
-        self.scheduler._started_at = datetime.now(timezone.utc)
+        self.scheduler._started_at = datetime.now(UTC)
         self.scheduler._finishes_at = self.scheduler._started_at + timedelta(hours=1)
 
     def test_added_light_is_turned_on_and_joins_the_run(self) -> None:
@@ -142,7 +142,7 @@ class RestoreTargetsTests(unittest.TestCase):
 
     def _restore(self, stored_targets, configured):
         scheduler, _ = make_scheduler(SCHEDULER, {}, zone(*configured))
-        started = datetime.now(timezone.utc)
+        started = datetime.now(UTC)
         scheduler._restore_active_run(
             {
                 "started_at": started.isoformat(),
@@ -206,7 +206,7 @@ class ExternalRecordTests(unittest.TestCase):
     def test_an_open_record_is_closed_when_the_run_takes_over(self) -> None:
         scheduler, _ = make_scheduler(SCHEDULER, {}, zone("light.a"))
         scheduler.store = FakeStore()
-        started = datetime.now(timezone.utc) - timedelta(minutes=30)
+        started = datetime.now(UTC) - timedelta(minutes=30)
         scheduler._history = [
             {
                 "started_at": started.isoformat(),
@@ -264,8 +264,8 @@ class DispatchTimeoutTests(unittest.TestCase):
     """An integration that never returns must not hang stop or unload."""
 
     def test_a_hanging_service_call_is_abandoned(self) -> None:
+
         from ha_stubs import FakeHass
-        import types as _types
 
         original = SCHEDULER.SERVICE_CALL_TIMEOUT
         SCHEDULER.SERVICE_CALL_TIMEOUT = 0.05
@@ -287,11 +287,11 @@ class DispatchTimeoutTests(unittest.TestCase):
 
 
 def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 def _days_ago_iso(days: int) -> str:
-    return (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+    return (datetime.now(UTC) - timedelta(days=days)).isoformat()
 
 
 if __name__ == "__main__":

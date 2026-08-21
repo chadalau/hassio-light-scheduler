@@ -8,7 +8,10 @@ Integração customizada para Home Assistant que controla todas as luzes de uma 
 2. Reinicie o Home Assistant.
 3. Acesse **Configurações → Dispositivos e serviços → Adicionar integração**.
 4. Procure **Light Scheduler**, informe o nome da sala e selecione todas as luzes ou tomadas dela.
-5. Os sensores de potência são opcionais. Quando possível, a integração os encontra automaticamente no mesmo dispositivo; também é possível escolhê-los manualmente.
+5. Cada luz ou tomada pertence a **uma zona só**. A integração recusa dar a uma zona
+   uma entidade que já está em outra: as duas brigariam em silêncio — a primeira
+   execução a terminar apagaria a luz e a outra continuaria se reportando ligada.
+6. Os sensores de potência são opcionais. Quando possível, a integração os encontra automaticamente no mesmo dispositivo; também é possível escolhê-los manualmente.
 
 As entidades podem ser alteradas depois diretamente pelo ícone de engrenagem do card. Cada entrada possui nome personalizado e um campo de autocomplete para a luz ou tomada e outro para o respectivo sensor de potência. Basta digitar parte do nome ou do `entity_id` para restarem apenas os resultados correspondentes. A ordem das linhas é a mesma usada no card, e o botão **Adicionar entrada** inclui novas luzes sem recriar a zona.
 
@@ -69,3 +72,30 @@ os watts acima dos quais aquela luz conta como acesa, usados na confirmação po
 potência. O padrão é 1 W; baixe para uma fita de LED de menos de 1 W, que nunca
 confirmaria o acendimento com o padrão, e suba para uma tomada com consumo de repouso
 mais alto.
+
+## Desenvolvimento
+
+Duas suítes, dois comandos.
+
+A rápida não precisa de nada instalado além do Python — usa stubs do Home
+Assistant e roda em menos de um segundo:
+
+```bash
+python -m unittest discover -s tests
+```
+
+A de integração roda o componente dentro de um Home Assistant de verdade, na
+imagem oficial, e é onde setup/unload, serviços, persistência e recuperação após
+reinicialização são checados contra as APIs reais:
+
+```bash
+./tests_integration/run.sh
+```
+
+Detalhes e o porquê do pareamento de versões em
+[tests_integration/README.md](tests_integration/README.md). O lint é Ruff, com a
+configuração em `pyproject.toml`:
+
+```bash
+ruff check custom_components tests tests_integration
+```

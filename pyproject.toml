@@ -1,0 +1,29 @@
+[tool.ruff]
+# Home Assistant 2026.8 runs on Python 3.13+; the container this is tested in
+# ships 3.14.
+target-version = "py313"
+line-length = 100
+
+[tool.ruff.lint]
+# Correctness and import hygiene, plus the modernization and bug-bear rules that
+# caught real problems here. Formatting-only rules are left out on purpose: this
+# code base mixes deliberately dense one-liners with wrapped blocks, and a
+# blanket reformat would bury the history of every file.
+select = ["E4", "E7", "E9", "F", "I", "UP", "B", "RUF"]
+# The compact `a(); b` and `if x: return` lines are a deliberate style in the
+# small pure modules and the entity classes, not an accident.
+ignore = ["E701", "E702"]
+
+[tool.ruff.lint.per-file-ignores]
+# The stubs deliberately install modules into sys.modules and shadow names.
+"tests/ha_stubs.py" = ["E402"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["light_scheduler"]
+
+[tool.pytest.ini_options]
+# The default run is the fast stub suite. The real Home Assistant suite lives in
+# tests_integration/ and is asked for by name, inside the container that has
+# Home Assistant installed: see tests_integration/README.md.
+testpaths = ["tests"]
+pythonpath = ["tests"]

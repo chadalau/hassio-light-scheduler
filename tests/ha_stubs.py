@@ -8,10 +8,11 @@ returns ``None``, say) silently disables the logic under test.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
-from pathlib import Path
+import asyncio
 import sys
 import types
+from datetime import UTC, datetime
+from pathlib import Path
 
 PACKAGE_DIR = (
     Path(__file__).resolve().parents[1] / "custom_components" / "light_scheduler"
@@ -29,8 +30,8 @@ def _parse_datetime(value):
 
 def _as_utc(value):
     if value.tzinfo is None:
-        return value.replace(tzinfo=timezone.utc)
-    return value.astimezone(timezone.utc)
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
 
 
 def install_homeassistant_stubs() -> None:
@@ -80,8 +81,8 @@ def install_homeassistant_stubs() -> None:
     module("homeassistant.util")
     module(
         "homeassistant.util.dt",
-        utcnow=lambda: datetime.now(timezone.utc),
-        now=lambda: datetime.now(timezone.utc),
+        utcnow=lambda: datetime.now(UTC),
+        now=lambda: datetime.now(UTC),
         parse_datetime=_parse_datetime,
         as_utc=_as_utc,
     )
@@ -117,17 +118,27 @@ class FakeHass:
 
     def async_create_task(self, coroutine):
         """Schedule work the way Home Assistant does: queued, not run inline."""
-        import asyncio
-
         task = asyncio.ensure_future(coroutine)
         self.tasks.append(task)
         return task
 
+    @property
+    def loop(self):
+        """Present when the real Home Assistant helpers are the ones running.
+
+        ``install_homeassistant_stubs`` steps aside if the real package was
+        imported first, and then the genuine dispatcher and event helpers run
+        against this object. They expect these two members.
+        """
+        return asyncio.get_running_loop()
+
+    def verify_event_loop_thread(self, what: str) -> None:
+        """No-op: the tests drive everything from the loop thread already."""
+        return None
+
     async def _async_call(self, domain, service, data, blocking=False):
         self.calls.append((service, data["entity_id"]))
         if self.hang:
-            import asyncio
-
             await asyncio.Event().wait()
 
 

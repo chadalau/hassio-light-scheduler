@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
 import importlib.util
-from pathlib import Path
 import unittest
-from zoneinfo import ZoneInfo
-
+from datetime import UTC, datetime, timedelta, timezone
+from pathlib import Path
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 MODULE_PATH = (
     Path(__file__).parents[1]
@@ -48,7 +47,7 @@ class FindNextRunTests(unittest.TestCase):
     def test_ignores_nonexistent_dst_time(self) -> None:
         try:
             local_timezone = ZoneInfo("America/New_York")
-        except Exception:
+        except ZoneInfoNotFoundError:
             self.skipTest("Timezone database is not installed")
         now = datetime(2026, 3, 7, 23, 0, tzinfo=local_timezone)
         nonexistent = {"time": "02:30", "days": [6], "enabled": True}
@@ -60,7 +59,7 @@ class FindNextRunTests(unittest.TestCase):
         self.assertIs(valid, schedule)
 
     def test_disabled_zone_has_no_next_run(self) -> None:
-        now = datetime(2026, 8, 14, 10, 0, tzinfo=timezone.utc)
+        now = datetime(2026, 8, 14, 10, 0, tzinfo=UTC)
         schedule = {"time": "11:00", "days": [4], "enabled": True}
 
         self.assertEqual((None, None), find_next_run([schedule], now, False))

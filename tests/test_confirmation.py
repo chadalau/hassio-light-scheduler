@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import time
 import unittest
+from typing import ClassVar
 
 from ha_stubs import FakeState, load_scheduler, make_scheduler
 
@@ -71,7 +72,7 @@ class ConfirmGroupTests(unittest.TestCase):
 class PowerConfirmationTests(unittest.TestCase):
     """A paired power sensor decides only when it is a real power reading."""
 
-    OPTIONS = {
+    OPTIONS: ClassVar[dict] = {
         "entity_mappings": [
             {
                 "name": "",

@@ -2,13 +2,12 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
 import logging
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 import voluptuous as vol
-
 from homeassistant.components.frontend import (
     DATA_EXTRA_MODULE_URL,
     add_extra_js_url,
@@ -18,7 +17,8 @@ from homeassistant.components.http import StaticPathConfig
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, ServiceCall
 from homeassistant.exceptions import ServiceValidationError
-from homeassistant.helpers import config_validation as cv, entity_registry as er
+from homeassistant.helpers import config_validation as cv
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.target import TargetSelection, async_extract_referenced_entity_ids
 from homeassistant.helpers.typing import ConfigType
 
@@ -55,9 +55,10 @@ from .const import (
     WARNING_TARGETS_REMOVED,
 )
 from .power import is_power_sensor
-from .schedules import new_schedule, prune_schedule_targets
 from .scheduler import LightScheduler
+from .schedules import new_schedule, prune_schedule_targets
 from .store import RuntimeStore
+from .zones import foreign_entities, newly_shared_entities, zone_targets
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -275,6 +276,30 @@ def _with_pruned_schedules(options: dict[str, Any]) -> dict[str, Any]:
     return {**options, CONF_SCHEDULES: schedules}
 
 
+def _assert_no_new_overlap(
+    hass: HomeAssistant, scheduler: LightScheduler, targets: list[str]
+) -> None:
+    """Refuse to hand a light that another zone already owns to this one.
+
+    Two zones driving one light fight each other silently: the first run to end
+    turns it off and the second keeps reporting itself as on, because a zone
+    ignores state changes on its own targets while active.
+
+    Only overlap this call would add is refused, so a zone that already shares a
+    light can still be edited -- and fixed.
+    """
+    shared = newly_shared_entities(
+        zone_targets(hass.config_entries.async_entries(DOMAIN)),
+        scheduler.target_entity_ids,
+        targets,
+        scheduler.entry.entry_id,
+    )
+    if shared:
+        raise ServiceValidationError(
+            "Estas luzes já pertencem a outra zona: " + ", ".join(shared)
+        )
+
+
 def _patched_schedule(
     scheduler: LightScheduler, schedule_id: str, patch: dict[str, Any]
 ) -> dict[str, Any]:
@@ -386,6 +411,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     await _register_frontend(hass)
     store = hass.data.setdefault(DOMAIN, {}).setdefault("store", RuntimeStore(hass))
     scheduler = LightScheduler(hass, entry, store)
+    shared = foreign_entities(
+        zone_targets(hass.config_entries.async_entries(DOMAIN)),
+        scheduler.target_entity_ids,
+        entry.entry_id,
+    )
+    if shared:
+        _LOGGER.warning(
+            "%s shares %s with another zone; whichever run ends first will turn "
+            "them off for both. Give each light to a single zone.",
+            entry.title, ", ".join(shared),
+        )
     await scheduler.async_setup()
     entry.runtime_data = scheduler
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
@@ -719,10 +755,10 @@ async def _register_services(hass: HomeAssistant) -> None:
                 else:
                     mappings = None
                 if mappings is not None:
+                    new_targets = [item["target_entity_id"] for item in mappings]
+                    _assert_no_new_overlap(hass, scheduler, new_targets)
                     options[CONF_ENTITY_MAPPINGS] = mappings
-                    options[CONF_TARGET_ENTITY_IDS] = [
-                        item["target_entity_id"] for item in mappings
-                    ]
+                    options[CONF_TARGET_ENTITY_IDS] = new_targets
                     options[CONF_POWER_ENTITY_IDS] = [
                         item["power_entity_id"]
                         for item in mappings

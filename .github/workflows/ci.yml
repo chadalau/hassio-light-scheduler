@@ -1,0 +1,109 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  python:
+    name: Lint and test the integration
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          # Home Assistant 2026.8 requires 3.13 or newer.
+          python-version: "3.13"
+
+      - name: Install tooling
+        # tzdata makes the DST tests run instead of skipping: without it they
+        # pass silently and stop guarding the very thing they were written for.
+        run: python -m pip install --upgrade ruff tzdata
+
+      - name: Ruff
+        run: ruff check custom_components tests
+
+      - name: Byte-compile
+        run: python -m compileall -q custom_components
+
+      - name: Tests
+        run: python -m unittest discover -s tests -v
+
+      - name: Fail if any test was skipped
+        run: |
+          python - <<'PY'
+          import subprocess, sys
+          out = subprocess.run(
+              [sys.executable, "-m", "unittest", "discover", "-s", "tests"],
+              capture_output=True, text=True,
+          ).stderr
+          if "skipped" in out:
+              print(out)
+              sys.exit("A skipped test is not a passing test.")
+          PY
+
+  integration:
+    name: Test against a real Home Assistant
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run the suite inside the official Home Assistant image
+        # Builds on ghcr.io/home-assistant/home-assistant:stable, so this is the
+        # real loader, config entries, dispatcher and Store -- not the stubs.
+        run: ./tests_integration/run.sh
+
+  frontend:
+    name: Check the Lovelace card
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Syntax check
+        run: node --check custom_components/light_scheduler/frontend/light-schedule-card.js
+
+  manifest:
+    name: Validate metadata
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: JSON is parseable and versions agree
+        run: |
+          python - <<'PY'
+          import json, pathlib, re, sys
+
+          root = pathlib.Path("custom_components/light_scheduler")
+          for path in [root / "manifest.json", root / "strings.json", *(root / "translations").glob("*.json")]:
+              json.loads(path.read_text(encoding="utf-8"))
+
+          manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))["version"]
+          card = re.search(
+              r'CARD_VERSION = "([^"]+)"',
+              (root / "frontend" / "light-schedule-card.js").read_text(encoding="utf-8"),
+          ).group(1)
+          if manifest != card:
+              sys.exit(f"manifest {manifest} != card {card}")
+          print(f"version {manifest}")
+
+          english = json.loads((root / "strings.json").read_text(encoding="utf-8"))
+          for path in (root / "translations").glob("*.json"):
+              other = json.loads(path.read_text(encoding="utf-8"))
+
+              def keys(node, prefix=""):
+                  if not isinstance(node, dict):
+                      return {prefix}
+                  return {k for key, value in node.items() for k in keys(value, f"{prefix}.{key}")}
+
+              missing = keys(english) - keys(other)
+              if missing:
+                  sys.exit(f"{path.name} is missing {sorted(missing)}")
+              print(f"{path.name} complete")
+          PY

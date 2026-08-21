@@ -7,10 +7,10 @@ fails here instead of in someone's living room.
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timedelta, timezone
 import importlib
 import unittest
-from zoneinfo import ZoneInfo
+from datetime import UTC, datetime, timedelta
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from ha_stubs import FakeState, load_scheduler, make_scheduler
 
@@ -72,7 +72,7 @@ class PendingStartTests(unittest.TestCase):
         scheduler, hass = make_scheduler(
             SCHEDULER, states, zone("light.a"), store=FakeStore()
         )
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         scheduler._active = True
         scheduler._stopping = True
         scheduler._run_targets = ["light.a"]
@@ -106,7 +106,7 @@ class PendingStartTests(unittest.TestCase):
         self.assertIsNone(scheduler._pending_start)
 
     def test_the_replayed_run_keeps_the_original_off_time(self) -> None:
-        scheduler, hass, now = self._stopping_zone()
+        scheduler, _hass, now = self._stopping_zone()
         # The shutdown ate half of the two hour window.
         scheduled_at = now - timedelta(hours=1)
 
@@ -137,7 +137,7 @@ class PendingStartTests(unittest.TestCase):
         self.assertFalse(scheduler.active)
 
     def test_unloading_drops_the_remembered_start(self) -> None:
-        scheduler, hass, now = self._stopping_zone()
+        scheduler, _hass, now = self._stopping_zone()
 
         async def scenario():
             scheduler._unloading = True
@@ -212,7 +212,7 @@ class AmbiguousTimeTests(unittest.TestCase):
     def _timezone(self):
         try:
             return ZoneInfo("America/New_York")
-        except Exception:  # pragma: no cover - depends on the host
+        except ZoneInfoNotFoundError:  # pragma: no cover - depends on the host
             self.skipTest("Timezone database is not installed")
 
     def test_a_repeated_hour_is_detected(self) -> None:
@@ -325,7 +325,7 @@ class NonBlockingServiceTests(unittest.TestCase):
         scheduler, hass = make_scheduler(
             SCHEDULER, states, zone("light.a"), store=FakeStore()
         )
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         scheduler._active = True
         scheduler._run_targets = ["light.a"]
         scheduler._started_at = now
@@ -353,7 +353,7 @@ class BoundedUnloadTests(unittest.TestCase):
         scheduler, hass = make_scheduler(
             SCHEDULER, states, zone(*entities), store=FakeStore()
         )
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         scheduler._active = True
         scheduler._run_targets = list(entities)
         scheduler._run_interval = 300

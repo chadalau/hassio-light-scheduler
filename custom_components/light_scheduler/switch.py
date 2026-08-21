@@ -3,7 +3,9 @@ from homeassistant.components.switch import SwitchEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
+
 from .const import SIGNAL_UPDATE
+
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_entities) -> None:
     async_add_entities([ScheduleEnabledSwitch(entry.runtime_data, entry)])

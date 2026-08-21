@@ -2,27 +2,50 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timedelta
 import logging
+from datetime import datetime, timedelta
 from typing import Any
 
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import (EVENT_HOMEASSISTANT_STARTED, STATE_OFF, STATE_ON, STATE_UNAVAILABLE,
-                                 STATE_UNKNOWN)
+from homeassistant.const import (
+    EVENT_HOMEASSISTANT_STARTED,
+    STATE_OFF,
+    STATE_ON,
+    STATE_UNAVAILABLE,
+    STATE_UNKNOWN,
+)
 from homeassistant.core import CoreState, Event, HomeAssistant, callback
 from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.helpers.event import async_track_point_in_time, async_track_state_change_event
 from homeassistant.util import dt as dt_util
 
-from .const import (ACTUATION_GRACE, CONF_DEFAULT_DURATION, CONF_ENABLED, CONF_ENTITY_MAPPINGS, CONF_MAX_DURATION,
-                    CONF_POWER_ENTITY_IDS, CONF_POWER_THRESHOLD, CONF_SCHEDULE_DURATION, CONF_SCHEDULE_ID,
-                    CONF_SCHEDULE_INTERVAL, CONF_SCHEDULES, CONF_TARGET_ENTITY_IDS,
-                    DEFAULT_POWER_THRESHOLD_W, HISTORY_MAX_ENTRIES, HISTORY_RETENTION_DAYS, MAX_SCHEDULE_INTERVAL,
-                    SERVICE_CALL_TIMEOUT, SIGNAL_UPDATE, SOURCE_EXTERNAL, SOURCE_MANUAL, SOURCE_SCHEDULE,
-                    WARNING_AMBIGUOUS_TIME)
+from .const import (
+    ACTUATION_GRACE,
+    CONF_DEFAULT_DURATION,
+    CONF_ENABLED,
+    CONF_ENTITY_MAPPINGS,
+    CONF_MAX_DURATION,
+    CONF_POWER_ENTITY_IDS,
+    CONF_POWER_THRESHOLD,
+    CONF_SCHEDULE_DURATION,
+    CONF_SCHEDULE_ID,
+    CONF_SCHEDULE_INTERVAL,
+    CONF_SCHEDULES,
+    CONF_TARGET_ENTITY_IDS,
+    DEFAULT_POWER_THRESHOLD_W,
+    HISTORY_MAX_ENTRIES,
+    HISTORY_RETENTION_DAYS,
+    MAX_SCHEDULE_INTERVAL,
+    SERVICE_CALL_TIMEOUT,
+    SIGNAL_UPDATE,
+    SOURCE_EXTERNAL,
+    SOURCE_MANUAL,
+    SOURCE_SCHEDULE,
+    WARNING_AMBIGUOUS_TIME,
+)
+from .next_run import ambiguous_schedule_ids, find_next_run
 from .power import read_power_watts
 from .store import RuntimeStore
-from .next_run import ambiguous_schedule_ids, find_next_run
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -261,6 +284,13 @@ class LightScheduler:
         self._notify()
 
     async def _record_external(self, entity_id: str, is_on: bool) -> None:
+        # Re-checked here, not only in the callback that queued this: a run can
+        # start between the two, and the record would then be opened inside a
+        # run we own. Nothing would ever close it -- off events are ignored
+        # while active -- so it would report a duration that swallowed the run
+        # and survive until the 30 day retention pruned it.
+        if self._active or self._unloading:
+            return
         now = dt_util.utcnow()
         if is_on:
             if any(

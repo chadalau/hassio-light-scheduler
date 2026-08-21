@@ -5,9 +5,17 @@ from datetime import time
 from typing import Any
 from uuid import uuid4
 
-from .const import (CONF_ENABLED, CONF_SCHEDULE_DAYS, CONF_SCHEDULE_DURATION, CONF_SCHEDULE_ID,
-                    CONF_SCHEDULE_INTERVAL, CONF_SCHEDULE_TIME, CONF_SCHEDULE_WARNING,
-                    CONF_TARGET_ENTITY_IDS, WARNING_TARGETS_REMOVED)
+from .const import (
+    CONF_ENABLED,
+    CONF_SCHEDULE_DAYS,
+    CONF_SCHEDULE_DURATION,
+    CONF_SCHEDULE_ID,
+    CONF_SCHEDULE_INTERVAL,
+    CONF_SCHEDULE_TIME,
+    CONF_SCHEDULE_WARNING,
+    CONF_TARGET_ENTITY_IDS,
+    WARNING_TARGETS_REMOVED,
+)
 
 
 def serialize_schedule(schedule: dict[str, Any]) -> dict[str, Any]:
