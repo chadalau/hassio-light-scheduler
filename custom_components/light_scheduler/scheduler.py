@@ -64,6 +64,7 @@ class LightScheduler:
         self._source: str | None = None
         self._started_at: datetime | None = None
         self._finishes_at: datetime | None = None
+        self._idle_started_at: datetime | None = None
         self._history: list[dict[str, Any]] = []
         self._unsub_next = None
         self._unsub_finish = None
@@ -179,6 +180,16 @@ class LightScheduler:
         return latest
 
     @property
+    def idle_started_at(self) -> datetime | None:
+        """Return when the whole zone most recently became idle.
+
+        Unlike ``last_finished_at``, this also follows an external or manual
+        shutdown.  It is stored independently from history so the inactive
+        header timeline survives a Lovelace reload and a Home Assistant restart.
+        """
+        return self._idle_started_at
+
+    @property
     def history(self) -> list[dict[str, Any]]:
         return self._history
 
@@ -206,6 +217,17 @@ class LightScheduler:
         """Restore runtime data and subscribe to scheduler and light activity."""
         stored = await self.store.async_get(self.entry.entry_id)
         self._history = list(stored.get("history", []))[-HISTORY_MAX_ENTRIES:]
+        raw_idle_started = stored.get("idle_started_at")
+        restored_idle_started = (
+            dt_util.parse_datetime(raw_idle_started)
+            if isinstance(raw_idle_started, str)
+            else None
+        )
+        self._idle_started_at = (
+            dt_util.as_utc(restored_idle_started)
+            if restored_idle_started
+            else self.last_finished_at
+        )
         self._restore_active_run(stored.get("active_run"))
         self._unsub_states = async_track_state_change_event(self.hass, self.target_entity_ids, self._on_light_changed)
         if self.hass.state is CoreState.running:
@@ -295,20 +317,23 @@ class LightScheduler:
         if self._active:
             return
         new_state = event.data.get("new_state")
+        changed_at = getattr(new_state, "last_changed", None)
         if new_state and new_state.state == STATE_ON:
             self._create_background_task(
-                self._record_external(event.data["entity_id"], True)
+                self._record_external(event.data["entity_id"], True, changed_at)
             )
         elif new_state and new_state.state == STATE_OFF:
             # Only a real off closes the record. Going unavailable/unknown is
             # a loss of contact, not a confirmed shutdown, and closing on it
             # would invent a duration and split the next run in two.
             self._create_background_task(
-                self._record_external(event.data["entity_id"], False)
+                self._record_external(event.data["entity_id"], False, changed_at)
             )
         self._notify()
 
-    async def _record_external(self, entity_id: str, is_on: bool) -> None:
+    async def _record_external(
+        self, entity_id: str, is_on: bool, changed_at: datetime | None = None
+    ) -> None:
         # Re-checked here, not only in the callback that queued this: a run can
         # start between the two, and the record would then be opened inside a
         # run we own. Nothing would ever close it -- off events are ignored
@@ -316,7 +341,12 @@ class LightScheduler:
         # and survive until the 30 day retention pruned it.
         if self._active or self._unloading:
             return
-        now = dt_util.utcnow()
+        now = (
+            dt_util.as_utc(changed_at)
+            if isinstance(changed_at, datetime)
+            else dt_util.utcnow()
+        )
+        changed = False
         if is_on:
             if any(
                 item.get("source") == SOURCE_EXTERNAL
@@ -327,6 +357,7 @@ class LightScheduler:
                 return
             self._history.append({"started_at": now.isoformat(), "finished_at": None,
                                   "duration": None, "source": SOURCE_EXTERNAL, "entity_id": entity_id})
+            changed = True
         else:
             for item in reversed(self._history):
                 if (
@@ -346,10 +377,27 @@ class LightScheduler:
                         if started
                         else None
                     )
+                    changed = True
                     break
-            else:
-                return
-        await self._save_history()
+
+            # The inactive timeline starts only after the final light is off.
+            # Persist this even when no matching external-on record exists: HA
+            # may have restarted while the light was already on.
+            if self._zone_is_fully_off():
+                if self._idle_started_at is None or now > self._idle_started_at:
+                    self._idle_started_at = now
+                changed = True
+        if changed:
+            await self._save_history()
+
+    def _zone_is_fully_off(self) -> bool:
+        """Return whether every configured target is confirmed off."""
+        targets = self.target_entity_ids
+        return bool(targets) and all(
+            (state := self.hass.states.get(entity_id)) is not None
+            and state.state == STATE_OFF
+            for entity_id in targets
+        )
 
     def _schedule_next(self) -> None:
         if self._unsub_next:
@@ -762,6 +810,7 @@ class LightScheduler:
         self._run_warnings = []
         self._run_schedule_id = None
         self._source = None; self._started_at = None; self._finishes_at = None
+        self._idle_started_at = finished
         self._prune_history()
         await self._save_runtime(immediate=True)
         if schedule_next:
@@ -867,7 +916,15 @@ class LightScheduler:
             }
         await self.store.async_set(
             self.entry.entry_id,
-            {"history": self._history, "active_run": active_run},
+            {
+                "history": self._history,
+                "active_run": active_run,
+                "idle_started_at": (
+                    self._idle_started_at.isoformat()
+                    if self._idle_started_at
+                    else None
+                ),
+            },
             immediate=immediate,
         )
         self._notify()

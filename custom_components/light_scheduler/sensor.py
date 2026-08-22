@@ -179,6 +179,7 @@ class LightScheduleStatus(SensorEntity):
         targets = self.scheduler.target_entity_ids
         power_mapping = self._power_mapping()
         last_finished_at = self.scheduler.last_finished_at
+        idle_started_at = self.scheduler.idle_started_at
         configured = {
             item.get("target_entity_id"): item
             for item in self.scheduler.entity_mappings
@@ -250,6 +251,9 @@ class LightScheduleStatus(SensorEntity):
             ),
             "last_finished_at": (
                 last_finished_at.isoformat() if last_finished_at else None
+            ),
+            "idle_started_at": (
+                idle_started_at.isoformat() if idle_started_at else None
             ),
             "source": self.scheduler.source,
             "enabled": self.scheduler.enabled,

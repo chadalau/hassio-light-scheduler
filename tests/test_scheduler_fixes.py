@@ -231,6 +231,67 @@ class LastFinishedAtTests(unittest.TestCase):
         self.assertIsNone(scheduler.last_finished_at)
 
 
+class IdleStartedAtTests(unittest.TestCase):
+    """The inactive timeline persists when the whole zone becomes off."""
+
+    def test_external_off_sets_and_persists_idle_start_without_open_record(self) -> None:
+        scheduler, _ = make_scheduler(
+            SCHEDULER,
+            {"light.a": FakeState("off"), "light.b": FakeState("off")},
+            zone("light.a", "light.b"),
+        )
+        scheduler.store = FakeStore()
+        changed_at = datetime.now(UTC) - timedelta(minutes=5)
+
+        asyncio.run(scheduler._record_external("light.b", False, changed_at))
+
+        self.assertEqual(changed_at, scheduler.idle_started_at)
+        self.assertEqual(changed_at.isoformat(), scheduler.store.saved["idle_started_at"])
+
+    def test_one_off_light_does_not_start_idle_period(self) -> None:
+        scheduler, _ = make_scheduler(
+            SCHEDULER,
+            {"light.a": FakeState("off"), "light.b": FakeState("on")},
+            zone("light.a", "light.b"),
+        )
+        scheduler.store = FakeStore()
+
+        asyncio.run(scheduler._record_external("light.a", False))
+
+        self.assertIsNone(scheduler.idle_started_at)
+        self.assertIsNone(scheduler.store.saved)
+
+    def test_delayed_event_cannot_move_idle_start_backwards(self) -> None:
+        scheduler, _ = make_scheduler(
+            SCHEDULER,
+            {"light.a": FakeState("off"), "light.b": FakeState("off")},
+            zone("light.a", "light.b"),
+        )
+        scheduler.store = FakeStore()
+        latest = datetime.now(UTC)
+        scheduler._idle_started_at = latest
+
+        asyncio.run(
+            scheduler._record_external(
+                "light.a", False, latest - timedelta(seconds=5)
+            )
+        )
+
+        self.assertEqual(latest, scheduler.idle_started_at)
+
+    def test_runtime_payload_keeps_idle_start_across_reload(self) -> None:
+        scheduler, _ = make_scheduler(SCHEDULER, {}, zone("light.a"))
+        scheduler.store = FakeStore()
+        idle_started_at = datetime.now(UTC) - timedelta(hours=1)
+        scheduler._idle_started_at = idle_started_at
+
+        asyncio.run(scheduler._save_runtime(immediate=True))
+
+        self.assertEqual(
+            idle_started_at.isoformat(), scheduler.store.saved["idle_started_at"]
+        )
+
+
 class ExternalRecordTests(unittest.TestCase):
     """An external record left open across a run reported a bogus duration.
 

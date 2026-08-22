@@ -1,4 +1,4 @@
-const CARD_VERSION = "0.8.6";
+const CARD_VERSION = "0.8.7";
 
 class LightScheduleCard extends HTMLElement {
   constructor() {
@@ -1042,7 +1042,9 @@ class LightScheduleCard extends HTMLElement {
 
     const remaining = Math.max(0, target - Date.now());
     const start = Date.parse(
-      active ? attrs.started_at || "" : attrs.last_finished_at || ""
+      active
+        ? attrs.started_at || ""
+        : attrs.idle_started_at || attrs.last_finished_at || ""
     );
     const duration = Number.isFinite(start) && target > start
       ? target - start
