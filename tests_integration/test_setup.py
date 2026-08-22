@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import pytest
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import ServiceValidationError
+from homeassistant.helpers import device_registry as dr
 
 DOMAIN = "light_scheduler"
 
@@ -72,6 +74,64 @@ async def test_the_status_sensor_publishes_what_the_card_reads(
     ]
     assert attributes["lights_on"] == 0
     assert attributes["enabled"] is True
+
+
+@pytest.mark.asyncio
+async def test_set_zone_options_renames_the_card_entry_and_device(
+    hass: HomeAssistant, zone_entry, lights
+) -> None:
+    """Rename every user-facing surface without changing entity ids."""
+    entry = zone_entry()
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+
+    entity_ids = {
+        domain: _zone_entity(hass, entry, domain)
+        for domain in ("sensor", "switch", "binary_sensor")
+    }
+    registry = dr.async_get(hass)
+    device = registry.async_get_device(identifiers={(DOMAIN, entry.entry_id)})
+    assert device is not None
+    assert device.name == "Sala"
+
+    await hass.services.async_call(
+        DOMAIN,
+        "set_zone_options",
+        {"entry_id": entry.entry_id, "name": "  Floração  "},
+        blocking=True,
+    )
+    await hass.async_block_till_done()
+
+    assert entry.data["name"] == "Floração"
+    assert entry.title == "Floração"
+    device = registry.async_get_device(identifiers={(DOMAIN, entry.entry_id)})
+    assert device is not None
+    assert device.name == "Floração"
+    assert {
+        domain: _zone_entity(hass, entry, domain)
+        for domain in ("sensor", "switch", "binary_sensor")
+    } == entity_ids
+    assert hass.states.get(entity_ids["sensor"]).attributes["zone_name"] == "Floração"
+
+
+@pytest.mark.asyncio
+async def test_set_zone_options_rejects_an_empty_zone_name(
+    hass: HomeAssistant, zone_entry, lights
+) -> None:
+    entry = zone_entry()
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+
+    with pytest.raises(ServiceValidationError, match="não pode ficar vazio"):
+        await hass.services.async_call(
+            DOMAIN,
+            "set_zone_options",
+            {"entry_id": entry.entry_id, "name": "   "},
+            blocking=True,
+        )
+
+    assert entry.data["name"] == "Sala"
+    assert entry.title == "Sala"
 
 
 @pytest.mark.asyncio

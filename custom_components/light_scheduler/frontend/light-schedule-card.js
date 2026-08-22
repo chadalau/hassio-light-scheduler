@@ -1,4 +1,4 @@
-const CARD_VERSION = "0.8.7";
+const CARD_VERSION = "0.8.8";
 
 class LightScheduleCard extends HTMLElement {
   constructor() {
@@ -349,6 +349,7 @@ class LightScheduleCard extends HTMLElement {
 
   _zoneDialog() {
     const attrs = this._state?.attributes || {};
+    const zoneName = attrs.zone_name || attrs.friendly_name || "Sala";
     const mappings = Array.isArray(attrs.entity_mappings) && attrs.entity_mappings.length
       ? attrs.entity_mappings
       : (attrs.lights || []).map((light) => ({
@@ -365,6 +366,14 @@ class LightScheduleCard extends HTMLElement {
             <div><small>Configuração da zona</small><h3>Escolher luzes e tomadas</h3></div>
             <button class="icon-button" type="button" data-action="close-zone-dialog" aria-label="Fechar"><ha-icon icon="mdi:close"></ha-icon></button>
           </div>
+          <label class="zone-name-field">
+            <span class="zone-name-icon"><ha-icon icon="mdi:rename-outline"></ha-icon></span>
+            <span class="zone-name-copy">
+              <strong>Nome da zona</strong>
+              <small>Renomeia o card, a integração e o dispositivo</small>
+            </span>
+            <input name="zone_name" type="text" maxlength="64" required value="${this._escape(zoneName)}" aria-label="Nome da zona">
+          </label>
           <div class="mapping-header" aria-hidden="true">
             <span></span><span>Nome</span><span>Luz ou interruptor</span><span>Potência</span><span></span>
           </div>
@@ -769,6 +778,11 @@ class LightScheduleCard extends HTMLElement {
   _openZoneDialog() {
     const dialog = this._zoneDialogElement();
     if (!dialog) return;
+    const attrs = this._state?.attributes || {};
+    const nameInput = dialog.querySelector('[name="zone_name"]');
+    if (nameInput) {
+      nameInput.value = attrs.zone_name || attrs.friendly_name || "Sala";
+    }
     const error = dialog.querySelector("[data-zone-error]");
     if (error) {
       error.hidden = true;
@@ -779,6 +793,14 @@ class LightScheduleCard extends HTMLElement {
 
   async _saveZone() {
     const dialog = this._zoneDialogElement();
+    const zoneName = dialog.querySelector('[name="zone_name"]')?.value.trim() || "";
+    const currentName = String(this._state?.attributes?.zone_name || "").trim();
+    const error = dialog.querySelector("[data-zone-error]");
+    if (!zoneName) {
+      error.textContent = "Informe o nome da zona.";
+      error.hidden = false;
+      return;
+    }
     const mappings = [...dialog.querySelectorAll("[data-mapping-row]")].map((row) => {
       const mapping = {
         name: row.querySelector('[name="mapping_name"]').value.trim(),
@@ -790,7 +812,6 @@ class LightScheduleCard extends HTMLElement {
       if (row.dataset.threshold) mapping.power_threshold_w = Number(row.dataset.threshold);
       return mapping;
     });
-    const error = dialog.querySelector("[data-zone-error]");
     if (!mappings.length || mappings.some((item) => !item.target_entity_id)) {
       error.textContent = "Selecione uma luz ou tomada em todas as entradas.";
       error.hidden = false;
@@ -808,10 +829,12 @@ class LightScheduleCard extends HTMLElement {
       error.hidden = false;
       return;
     }
-    await this._hass.callService("light_scheduler", "set_zone_options", {
+    const data = {
       entry_id: this._entryId(),
       entity_mappings: mappings,
-    });
+    };
+    if (zoneName !== currentName) data.name = zoneName;
+    await this._hass.callService("light_scheduler", "set_zone_options", data);
     dialog.close();
     this._render();
   }
@@ -1270,6 +1293,14 @@ class LightScheduleCard extends HTMLElement {
         .dialog-header { display: flex; align-items: center; justify-content: space-between; }
         .dialog-header small { color: var(--secondary-text-color); font-size: 10px; }
         .dialog-header h3 { margin: 2px 0 0; font-size: 18px; }
+        .zone-name-field { min-height: 58px; margin: 14px 0 12px; padding: 8px 10px; display: grid; grid-template-columns: 34px minmax(0,1fr) minmax(150px,.75fr); align-items: center; gap: 9px; border: 1px solid rgba(33,150,243,.26); border-radius: 8px; background: rgba(33,150,243,.045); }
+        .zone-name-icon { width: 32px; height: 32px; display: grid; place-items: center; border-radius: 8px; color: var(--ls-blue); background: rgba(33,150,243,.13); }
+        .zone-name-icon ha-icon { --mdc-icon-size: 18px; }
+        .zone-name-copy strong, .zone-name-copy small { display: block; }
+        .zone-name-copy strong { font-size: 11px; }
+        .zone-name-copy small { margin-top: 2px; color: var(--secondary-text-color); font-size: 9px; line-height: 1.3; }
+        .zone-name-field input { width: 100%; min-width: 0; height: 35px; padding: 0 9px; border: 1px solid rgba(127,127,127,.35); border-radius: 6px; outline: 0; color: var(--primary-text-color); background: var(--card-background-color, #1c1c1c); font-size: 11px; }
+        .zone-name-field input:focus { border-color: var(--ls-blue); box-shadow: 0 0 0 2px rgba(33,150,243,.10); }
         .fields { margin-top: 16px; display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
         .fields label, fieldset legend { color: var(--secondary-text-color); font-size: 11px; }
         .fields input { width: 100%; height: 39px; margin-top: 5px; padding: 0 10px; border: 1px solid rgba(127,127,127,.4); border-radius: 6px; outline: none; color: var(--primary-text-color); background: rgba(127,127,127,.08); }
@@ -1360,6 +1391,8 @@ class LightScheduleCard extends HTMLElement {
           .schedule-row { grid-template-columns: 26px 16px 84px auto minmax(0,1fr) 22px 22px; padding-inline: 6px; gap: 4px; }
         }
         @media (max-width: 560px) {
+          .zone-name-field { grid-template-columns: 34px minmax(0,1fr); }
+          .zone-name-field input { grid-column: 1 / -1; }
           .mapping-header { display: none; }
           .mapping-row { grid-template-columns: 24px minmax(0,1fr) minmax(0,1fr) 28px; }
           .mapping-order { grid-row: 1 / 3; }

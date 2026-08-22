@@ -15,6 +15,8 @@ from homeassistant.const import (
     STATE_UNKNOWN,
 )
 from homeassistant.core import CoreState, Event, HomeAssistant, callback
+from homeassistant.exceptions import ServiceValidationError
+from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.helpers.event import async_track_point_in_time, async_track_state_change_event
 from homeassistant.util import dt as dt_util
@@ -25,6 +27,7 @@ from .const import (
     CONF_ENABLED,
     CONF_ENTITY_MAPPINGS,
     CONF_MAX_DURATION,
+    CONF_NAME,
     CONF_POWER_ENTITY_IDS,
     CONF_POWER_THRESHOLD,
     CONF_SCHEDULE_DURATION,
@@ -33,6 +36,7 @@ from .const import (
     CONF_SCHEDULES,
     CONF_TARGET_ENTITY_IDS,
     DEFAULT_POWER_THRESHOLD_W,
+    DOMAIN,
     HISTORY_MAX_ENTRIES,
     HISTORY_RETENTION_DAYS,
     MAX_SCHEDULE_INTERVAL,
@@ -940,6 +944,40 @@ class LightScheduler:
             if self._active:
                 # Not awaited: the switch must answer before the stagger.
                 self.async_request_stop()
+
+    async def async_set_zone_name(self, name: str) -> None:
+        """Rename the zone without changing any entity ids.
+
+        The zone name is identity, so it is persisted in entry data and kept
+        aligned with both the config-entry title and the device registry. The
+        dispatcher refresh makes the card's ``zone_name`` attribute change
+        immediately, without waiting for a restart or another light event.
+        """
+        if not isinstance(name, str):
+            raise ServiceValidationError("O nome da zona precisa ser um texto")
+        clean = name.strip()
+        if not clean:
+            raise ServiceValidationError("O nome da zona não pode ficar vazio")
+        if len(clean) > 64:
+            raise ServiceValidationError(
+                "O nome da zona deve ter no máximo 64 caracteres"
+            )
+        if clean == self.entry.data.get(CONF_NAME) and clean == self.entry.title:
+            return
+
+        self.hass.config_entries.async_update_entry(
+            self.entry,
+            data={**dict(self.entry.data), CONF_NAME: clean},
+            title=clean,
+        )
+        device_registry = dr.async_get(self.hass)
+        device = device_registry.async_get_device(
+            identifiers={(DOMAIN, self.entry.entry_id)}
+        )
+        if device is not None:
+            device_registry.async_update_device(device.id, name=clean)
+        self._notify()
+        _LOGGER.info("Zone %s renamed to %r", self.entry.entry_id, clean)
 
     async def async_options_updated(self) -> None:
         if self._unsub_states:

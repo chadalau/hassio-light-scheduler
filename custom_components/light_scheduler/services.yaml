@@ -146,6 +146,10 @@ set_zone_options:
       name: ID da zona
       description: Alternativa ao target - identifica a zona diretamente pelo config entry.
       selector: {text: {}}
+    name:
+      name: Nome da zona
+      description: Renomeia o card, a entrada da integração e o dispositivo. Os IDs das entidades permanecem inalterados.
+      selector: {text: {}}
     entity_mappings:
       name: Entradas de iluminação
       description: >-

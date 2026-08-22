@@ -108,6 +108,22 @@ class CardEscapingTests(unittest.TestCase):
         self.assertNotIn('"', escaped)
 
 
+class CardZoneRenameTests(unittest.TestCase):
+    """The settings dialog must send an edited card name through the service."""
+
+    def test_zone_dialog_exposes_a_bounded_name_field(self) -> None:
+        source = CARD.read_text(encoding="utf-8")
+
+        self.assertIn('name="zone_name"', source)
+        self.assertIn('maxlength="64"', source)
+        self.assertIn('value="${this._escape(zoneName)}"', source)
+
+    def test_save_adds_the_name_only_when_it_changed(self) -> None:
+        source = CARD.read_text(encoding="utf-8")
+
+        self.assertIn('if (zoneName !== currentName) data.name = zoneName;', source)
+
+
 class ExternalRecordRaceTests(unittest.TestCase):
     """A light event queued while idle must not open a record inside a run.
 

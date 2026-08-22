@@ -101,6 +101,9 @@
           attributes.schedules = attributes.schedules.filter((item) => item.id !== data.id);
         } else if (domain === "light_scheduler" && service === "add_schedule") {
           attributes.schedules = [...attributes.schedules, { ...data, id: `s${Date.now()}` }];
+        } else if (domain === "light_scheduler" && service === "set_zone_options") {
+          if (data.name) attributes.zone_name = data.name;
+          if (data.entity_mappings) attributes.entity_mappings = data.entity_mappings;
         } else {
           console.log("callService", domain, service, data);
           return;

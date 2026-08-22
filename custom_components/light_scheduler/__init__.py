@@ -28,6 +28,7 @@ from .const import (
     CONF_DEFAULT_DURATION,
     CONF_ENABLED,
     CONF_ENTITY_MAPPINGS,
+    CONF_NAME,
     CONF_POWER_ENTITY_IDS,
     CONF_POWER_THRESHOLD,
     CONF_SCHEDULE_DAYS,
@@ -720,6 +721,7 @@ async def _register_services(hass: HomeAssistant) -> None:
         allowed = {
             CONF_ENTITY_MAPPINGS,
             CONF_DEFAULT_DURATION,
+            CONF_NAME,
             CONF_TARGET_ENTITY_IDS,
             CONF_POWER_ENTITY_IDS,
         }
@@ -733,6 +735,7 @@ async def _register_services(hass: HomeAssistant) -> None:
                 "Informe pelo menos uma opcao para alterar a zona."
             )
         schedulers = await _resolve(hass, call)
+        name = data.pop(CONF_NAME, None)
 
         def build(scheduler: LightScheduler) -> _OptionsBuilder:
             def apply(current: dict[str, Any]) -> dict[str, Any]:
@@ -777,7 +780,10 @@ async def _register_services(hass: HomeAssistant) -> None:
             return apply
 
         for scheduler in schedulers:
-            await _apply_options(hass, scheduler, build(scheduler))
+            if name is not None:
+                await scheduler.async_set_zone_name(name)
+            if data:
+                await _apply_options(hass, scheduler, build(scheduler))
 
     handlers = (
         (SERVICE_TURN_ON_NOW, turn_on),

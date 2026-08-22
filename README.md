@@ -58,7 +58,7 @@ Execuções em andamento são persistidas. Se o Home Assistant reiniciar, a inte
 - `light_scheduler.update_schedule`: edita um horário existente.
 - `light_scheduler.remove_schedule`: exclui um horário.
 - `light_scheduler.set_schedules`: substitui toda a agenda.
-- `light_scheduler.set_zone_options`: altera entidades e duração padrão.
+- `light_scheduler.set_zone_options`: renomeia a zona e altera entidades e duração padrão.
 
 Os serviços podem receber uma entidade do Light Scheduler como alvo. O card usa internamente o `entry_id` da zona para que todos os seus controles funcionem sem configuração adicional.
 

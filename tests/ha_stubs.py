@@ -67,7 +67,18 @@ def install_homeassistant_stubs() -> None:
         State=object,
         callback=lambda func: func,
     )
+    module(
+        "homeassistant.exceptions",
+        ServiceValidationError=type("ServiceValidationError", (Exception,), {}),
+    )
     module("homeassistant.helpers")
+    module(
+        "homeassistant.helpers.device_registry",
+        async_get=lambda hass: types.SimpleNamespace(
+            async_get_device=lambda **kwargs: None,
+            async_update_device=lambda *args, **kwargs: None,
+        ),
+    )
     module(
         "homeassistant.helpers.dispatcher",
         async_dispatcher_send=lambda *a, **k: None,
