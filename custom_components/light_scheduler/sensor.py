@@ -7,8 +7,13 @@ from typing import Any
 
 from homeassistant.components.sensor import SensorEntity
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import STATE_ON, STATE_UNAVAILABLE, STATE_UNKNOWN
-from homeassistant.core import Event, HomeAssistant, callback
+from homeassistant.const import (
+    EVENT_HOMEASSISTANT_STARTED,
+    STATE_ON,
+    STATE_UNAVAILABLE,
+    STATE_UNKNOWN,
+)
+from homeassistant.core import CoreState, Event, HomeAssistant, callback
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.event import async_track_state_change_event
@@ -71,13 +76,35 @@ class LightScheduleStatus(SensorEntity):
         next_run = self.scheduler.next_run
         return next_run.isoformat() if next_run else None
 
+    def _configured_power_ids(self) -> tuple[str, ...]:
+        """Return the meters the user paired, resolved or not."""
+        return tuple(
+            dict.fromkeys(
+                item["power_entity_id"]
+                for item in self.scheduler.entity_mappings
+                if item.get("power_entity_id")
+            )
+        )
+
     def _mapping_signature(self) -> tuple:
-        """Return everything the discovery result depends on, cheaply."""
+        """Return everything the discovery result depends on, cheaply.
+
+        Whether each paired meter is currently usable is part of it. A meter is
+        only accepted once it has a state carrying power metadata, and Home
+        Assistant makes no promise that the integration owning it has published
+        that state by the time this zone is set up. Leaving it out of the
+        signature meant a pairing lost to that race stayed lost: the empty
+        result was cached and nothing here ever asked again.
+        """
         return (
             tuple(self.scheduler.target_entity_ids),
             tuple(
                 (item.get("target_entity_id"), item.get("power_entity_id"))
                 for item in self.scheduler.entity_mappings
+            ),
+            tuple(
+                is_power_sensor(self.hass.states.get(entity_id))
+                for entity_id in self._configured_power_ids()
             ),
         )
 
@@ -90,9 +117,8 @@ class LightScheduleStatus(SensorEntity):
         is discovered automatically.
 
         Discovery walks the whole entity registry, so the result is cached and
-        rebuilt only when the zone's own selection changes or the registry does
-        -- not on every zone signal, which fires on each light change, each save
-        and each re-arm of the timetable.
+        rebuilt only when its inputs change -- not on every zone signal, which
+        fires on each light change, each save and each re-arm of the timetable.
         """
         signature = self._mapping_signature()
         if self._cached_power_mapping is not None and signature == self._cached_signature:
@@ -273,8 +299,18 @@ class LightScheduleStatus(SensorEntity):
 
     @callback
     def _refresh_state_listener(self) -> None:
-        power_ids = tuple(self._power_mapping().values())
-        watched = tuple(dict.fromkeys((*self.scheduler.target_entity_ids, *power_ids)))
+        # Paired meters are watched even while unresolved: their first state is
+        # what makes the pairing possible, and if we only watched what already
+        # resolved we would never hear about it.
+        watched = tuple(
+            dict.fromkeys(
+                (
+                    *self.scheduler.target_entity_ids,
+                    *self._configured_power_ids(),
+                    *self._power_mapping().values(),
+                )
+            )
+        )
         if watched == self._watched_entities:
             return
         if self._unsub_state_listener:
@@ -290,10 +326,14 @@ class LightScheduleStatus(SensorEntity):
 
     @callback
     def _handle_watched_state(self, event: Any) -> None:
-        """Refresh mapping if a configured sensor disappears."""
+        """Follow a watched entity, re-pairing when what it offers changes."""
         if event.data.get("new_state") is None:
+            # Gone for good rather than merely unreadable: drop the cache so a
+            # replacement can be discovered.
             self._cached_power_mapping = None
-            self._refresh_state_listener()
+        # Cheap when nothing moved: the signature decides whether the registry
+        # is walked again, and the listener returns early if the set is equal.
+        self._refresh_state_listener()
         self.async_write_ha_state()
 
     @callback
@@ -301,6 +341,18 @@ class LightScheduleStatus(SensorEntity):
         if self._unsub_state_listener:
             self._unsub_state_listener()
             self._unsub_state_listener = None
+
+    @callback
+    def _handle_started(self, _: Event) -> None:
+        """Re-pair once everything else has finished starting.
+
+        Covers the meters this zone never named: a sensor discovered by device
+        is not in any list here, so no state listener of ours is watching it
+        while it is still missing.
+        """
+        self._cached_power_mapping = None
+        self._refresh_state_listener()
+        self.async_write_ha_state()
 
     async def async_added_to_hass(self) -> None:
         """Subscribe to scheduler, target, power and registry changes."""
@@ -316,5 +368,11 @@ class LightScheduleStatus(SensorEntity):
                 er.EVENT_ENTITY_REGISTRY_UPDATED, self._handle_registry_update
             )
         )
+        if self.hass.state is not CoreState.running:
+            self.async_on_remove(
+                self.hass.bus.async_listen_once(
+                    EVENT_HOMEASSISTANT_STARTED, self._handle_started
+                )
+            )
         self.async_on_remove(self._remove_state_listener)
         self._refresh_state_listener()
