@@ -11,9 +11,9 @@ jobs:
     name: Lint and test the integration
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           # Home Assistant 2026.8 requires 3.13 or newer.
           python-version: "3.13"
@@ -52,7 +52,7 @@ jobs:
     name: Test against a real Home Assistant
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Run the suite inside the official Home Assistant image
         # Builds on ghcr.io/home-assistant/home-assistant:stable, so this is the
@@ -63,11 +63,13 @@ jobs:
     name: Check the Lovelace card
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
-          node-version: "22"
+          # Only used to run `node --check` on the card. Unrelated to the
+          # runtime the actions above declare, which is fixed by their version.
+          node-version: "24"
 
       - name: Syntax check
         run: node --check custom_components/light_scheduler/frontend/light-schedule-card.js
@@ -76,7 +78,7 @@ jobs:
     name: Validate metadata
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: JSON is parseable and versions agree
         run: |
